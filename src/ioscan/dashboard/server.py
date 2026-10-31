@@ -1,0 +1,564 @@
+from __future__ import annotations
+
+from datetime import datetime
+import importlib.util
+import json
+import os
+from pathlib import Path
+import queue
+import re
+import threading
+import time
+from typing import Literal
+
+import cv2
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from ioscan.capture.logger import CaptureConfig, record_hardware_session
+
+
+SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+class SegmentationRequest(BaseModel):
+    jaw: Literal["lower", "upper"] = "lower"
+    models_dir: str | None = None
+
+
+class CaptureRequest(BaseModel):
+    camera_id: int = Field(default=0, ge=0, le=16)
+    serial_port: str = Field(default="COM3", min_length=1, max_length=32)
+    frames: int = Field(default=1200, ge=20, le=20000)
+    exposure: int = Field(default=-7, ge=-13, le=0)
+    session_name: str | None = None
+    jaw: Literal["lower", "upper"] = "lower"
+    models_dir: str | None = None
+    calibration_file: str | None = None
+    auto_segment: bool = True
+    mesh_method: Literal["bpa", "poisson", "tsdf"] = "bpa"
+    speed_mm_s: float = Field(default=5.0, gt=0.05, le=50.0)
+
+
+class ScannerDashboard:
+    def __init__(self, project_root: Path):
+        self.project_root = project_root.resolve()
+        self._lock = threading.RLock()
+        self._stop_event: threading.Event | None = None
+        self._worker: threading.Thread | None = None
+        self._latest_jpeg: bytes | None = None
+        self._last_frame_at: float | None = None
+        self._state: dict = self._initial_state()
+        self.session_dir: Path | None = None
+        self.results_dir: Path | None = None
+        self._live_camera = None
+        self._live_laser = None
+        self._live_fuser = None
+        self._live_tracker = None
+        self._live_last_off: np.ndarray | None = None
+        self._live_profiles = 0
+        self._live_points = 0
+        self._live_last_off_idx: int = -10
+        self._preview_q: queue.Queue | None = None
+        self._preview_stop = threading.Event()
+        self._preview_thread: threading.Thread | None = None
+        self._last_request: CaptureRequest | None = None
+
+    @staticmethod
+    def _initial_state() -> dict:
+        return {
+            "phase": "idle", "stage": "ready", "message": "Connect the scanner to begin.",
+            "progress": 0.0, "frame": 0, "processed_frames": 0, "frames_total": 0, "laser_on": False,
+            "camera_fps": 0.0, "preview_revision": 0, "model_revision": 0,
+            "model_asset": None, "session_dir": None, "results_dir": None,
+            "jaw": "lower", "auto_segment": True, "mesh_vertices": 0,
+            "mesh_faces": 0, "point_count": 0, "trajectory_mm": 0.0,
+            "segmentation": None, "warnings": [], "error": None,
+            "outputs": {}, "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def _update(self, **updates) -> None:
+        with self._lock:
+            self._state.update(updates)
+            self._state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return json.loads(json.dumps(self._state))
+
+    def camera_probe(self, camera_id: int) -> dict:
+        if self.snapshot()["phase"] in {"capturing", "processing"}:
+            raise HTTPException(409, "Camera is in use by the active scan.")
+        cap = cv2.VideoCapture(camera_id, cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY)
+        try:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1600)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1200)
+            ok, frame = cap.read() if cap.isOpened() else (False, None)
+            if not ok or frame is None:
+                raise HTTPException(503, f"Could not read a frame from camera index {camera_id}.")
+            h, w = frame.shape[:2]
+            ok_jpg, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
+            if ok_jpg:
+                with self._lock:
+                    self._latest_jpeg = encoded.tobytes()
+            return {"connected": True, "camera_id": camera_id, "width": w, "height": h}
+        finally:
+            cap.release()
+
+    def start_capture(self, request: CaptureRequest) -> dict:
+        current = self.snapshot()
+        if current["phase"] in {"capturing", "processing"}:
+            raise HTTPException(409, "A scan is already running.")
+
+        # Validate the requested jaw checkpoint before acquiring a potentially long scan.
+        # The previous dashboard flow only discovered missing/incompatible weights after
+        # reconstruction, which wasted capture time and left a partial session behind.
+        if request.auto_segment:
+            try:
+                from ioscan.pipeline.segment import (
+                    SegmentConfig, _import_torch, _load_network, resolve_segmentation_model,
+                )
+                seg_kwargs = {"jaw": request.jaw, "device": "cpu"}
+                if request.models_dir:
+                    seg_kwargs["models_dir"] = Path(request.models_dir).expanduser()
+                seg_cfg = SegmentConfig(**seg_kwargs)
+                _import_torch()
+                checkpoint, _selected_jaw = resolve_segmentation_model(seg_cfg)
+                net, _inner_checkpoint = _load_network(seg_cfg, checkpoint, "cpu")
+                del net
+            except Exception as exc:
+                raise HTTPException(
+                    422,
+                    "MeshSegNet preflight failed before capture. Check PyTorch, the selected jaw, "
+                    f"and the checkpoint folder. Details: {exc}",
+                ) from exc
+        session_name = request.session_name or datetime.now().strftime("scan_%Y%m%d_%H%M%S")
+        if not SESSION_RE.fullmatch(session_name):
+            raise HTTPException(422, "Session name may contain letters, numbers, underscores and hyphens only.")
+
+        session_dir = self.project_root / "data" / "sessions" / session_name
+        results_dir = self.project_root / "data" / "results" / session_name
+        if session_dir.exists():
+            raise HTTPException(409, f"Session folder already exists: {session_dir}")
+        if results_dir.exists():
+            raise HTTPException(409, f"Results folder already exists: {results_dir}")
+
+        session_dir.parent.mkdir(parents=True, exist_ok=True)
+        results_dir.mkdir(parents=True, exist_ok=True)
+        self.session_dir, self.results_dir = session_dir, results_dir
+        self._last_request = request
+        self._stop_event = threading.Event()
+        with self._lock:
+            self._latest_jpeg = None
+        self._state = self._initial_state()
+        self._update(
+            phase="capturing", stage="capturing", message="Opening camera and recording scan frames…",
+            frames_total=request.frames, session_dir=str(session_dir), results_dir=str(results_dir),
+            jaw=request.jaw, auto_segment=request.auto_segment,
+        )
+        self._worker = threading.Thread(
+            target=self._capture_worker, args=(request, session_dir, results_dir),
+            name="ioscan-dashboard-capture", daemon=True,
+        )
+        self._worker.start()
+        return {"started": True, "session_name": session_name, "session_dir": str(session_dir)}
+
+    def stop_capture(self) -> dict:
+        with self._lock:
+            if self._state.get("phase") != "capturing" or self._stop_event is None:
+                raise HTTPException(409, "There is no active capture to stop.")
+            self._stop_event.set()
+            self._state["message"] = "Stopping capture and closing the session…"
+        return {"stopping": True}
+
+    def _init_live_reconstruction(self, cfg: CaptureConfig, camera_cal: dict | None,
+                                  laser_cal: dict | None, speed_mm_s: float) -> None:
+        """Prepare a lightweight fusion path so the viewport grows during acquisition."""
+        self._live_camera = self._live_laser = self._live_fuser = self._live_tracker = None
+        self._live_last_off = None
+        self._live_profiles = self._live_points = 0
+        try:
+            from ioscan.capture.logger import _build_calibration
+            from ioscan.pipeline.fusion import FusionConfig, ScanFuser
+            from ioscan.pipeline.pose import PoseConfig
+            camera_model, laser_model, nominal = _build_calibration(cfg, camera_cal, laser_cal)
+            self._live_camera, self._live_laser = camera_model, laser_model
+            if nominal:
+                self._update(warnings=["No measured calibration JSON supplied; live preview uses nominal example camera/laser geometry."])
+            self._live_fuser = ScanFuser(camera_model, FusionConfig(voxel_size_mm=0.08, use_tsdf=False))
+            self._live_pose_config = PoseConfig(mode="imu_hybrid", nominal_speed_mm_s=speed_mm_s)
+        except Exception as exc:
+            # Preview is a convenience; the saved-session pipeline remains authoritative.
+            self._live_camera = self._live_laser = self._live_fuser = None
+            self._update(warnings=[f"Live 3D preview unavailable: {exc}"])
+
+    def _update_live_geometry(self, gray: np.ndarray, idx: int, laser_on: bool,
+                              t_ns: int, quat_wxyz: np.ndarray | None) -> None:
+        if not laser_on:
+            self._live_last_off = gray
+            self._live_last_off_idx = idx
+            return
+        if self._live_fuser is None or self._live_camera is None or self._live_laser is None:
+            return
+        if quat_wxyz is None or self._live_last_off is None:
+            return
+        if idx - self._live_last_off_idx > 3:
+            return  # preview frames were dropped; do not subtract a stale ambient image
+        try:
+            from ioscan.pipeline.pose import PoseTracker
+            from ioscan.pipeline.ridge import RidgeConfig
+            from ioscan.pipeline.triangulate import triangulate_frame
+            timestamp_s = float(t_ns) * 1e-9
+            if self._live_tracker is None:
+                self._live_tracker = PoseTracker(self._live_pose_config, initial_timestamp_s=timestamp_s)
+            pts_cam, uv, _ = triangulate_frame(
+                gray, self._live_last_off, self._live_camera, self._live_laser,
+                ridge_cfg=RidgeConfig(method="cog", saturation_limit=254.0),
+                z_range=(10.0, 45.0),
+            )
+            transform = self._live_tracker.update(
+                frame_index=idx, timestamp_s=timestamp_s, quat_wxyz=quat_wxyz, pts_cam=pts_cam,
+            )
+            if pts_cam.shape[0]:
+                self._live_fuser.integrate(pts_cam, uv, transform)
+                self._live_points += int(len(pts_cam))
+            self._live_profiles += 1
+            if self._live_profiles % 12 == 0 and self.results_dir is not None:
+                preview = self._live_fuser.get_preview_point_cloud(voxel_downsample_mm=0.16)
+                if len(preview.points):
+                    import os
+                    import open3d as o3d
+                    final_path = self.results_dir / "reconstruction_preview.ply"
+                    temp_path = self.results_dir / "reconstruction_preview.tmp.ply"
+                    if o3d.io.write_point_cloud(str(temp_path), preview, write_ascii=False):
+                        os.replace(temp_path, final_path)
+                        with self._lock:
+                            self._state.update(
+                                model_asset="preview",
+                                model_revision=int(self._state.get("model_revision", 0)) + 1,
+                                point_count=self._live_points,
+                                message="Live 3D point cloud is growing as scan profiles are fused…",
+                            )
+        except Exception as exc:
+            # Keep camera capture alive if the optional live preview encounters a geometry issue.
+            self._live_fuser = None
+            self._update(warnings=[f"Live 3D preview paused: {exc}"])
+
+    def _start_preview_worker(self) -> None:
+        """Run live triangulation/JPEG encoding off the capture thread.
+
+        The capture loop must pair every ESP32 strobe packet with exactly one camera frame at the
+        camera rate; any heavy per-frame work there overflows the serial event queue.
+        """
+        self._preview_stop = threading.Event()
+        self._preview_q = queue.Queue(maxsize=6)
+        self._preview_thread = threading.Thread(
+            target=self._preview_loop, name="ioscan-dashboard-preview", daemon=True)
+        self._preview_thread.start()
+
+    def _stop_preview_worker(self) -> None:
+        self._preview_stop.set()
+        if self._preview_thread is not None:
+            self._preview_thread.join(timeout=5.0)
+        self._preview_thread = None
+
+    def _preview_loop(self) -> None:
+        q = self._preview_q
+        while True:
+            try:
+                gray, idx, laser_on, t_ns, quat = q.get(timeout=0.1)
+            except queue.Empty:
+                if self._preview_stop.is_set():
+                    return
+                continue
+            try:
+                self._update_live_geometry(gray, idx, laser_on, t_ns, quat)
+                ok, encoded = cv2.imencode(".jpg", gray, [cv2.IMWRITE_JPEG_QUALITY, 76])
+                if ok:
+                    with self._lock:
+                        self._latest_jpeg = encoded.tobytes()
+            except Exception as exc:  # preview must never break capture
+                self._update(warnings=[f"Live preview paused: {exc}"])
+
+    def _on_frame(self, gray: np.ndarray, idx: int, laser_on: bool, t_ns: int,
+                  quat_wxyz: np.ndarray | None) -> None:
+        """Capture-thread callback: O(1) bookkeeping only; heavy work is queued."""
+        now = time.perf_counter()
+        with self._lock:
+            fps = 1.0 / max(now - self._last_frame_at, 1e-6) if self._last_frame_at else 0.0
+            self._last_frame_at = now
+            self._state.update(
+                frame=idx + 1, laser_on=bool(laser_on),
+                progress=100.0 * (idx + 1) / max(int(self._state.get("frames_total", 1)), 1),
+                camera_fps=round(fps, 1) if fps < 200 else 0.0,
+                preview_revision=int(self._state.get("preview_revision", 0)) + 1,
+            )
+        q = self._preview_q
+        if q is None:
+            return
+        item = (gray.copy(), idx, bool(laser_on), int(t_ns), None if quat_wxyz is None else quat_wxyz.copy())
+        try:
+            q.put_nowait(item)
+        except queue.Full:
+            try:
+                q.get_nowait()          # drop the oldest preview frame, never block capture
+            except queue.Empty:
+                pass
+            try:
+                q.put_nowait(item)
+            except queue.Full:
+                pass
+
+    def _capture_worker(self, request: CaptureRequest, session_dir: Path, results_dir: Path) -> None:
+        try:
+            cfg = CaptureConfig(
+                camera_id=request.camera_id, width=1600, height=1200, fps=50,
+                exposure=request.exposure, serial_port=request.serial_port.strip(),
+                max_frames=request.frames, show_preview=False,
+            )
+            camera_cal = laser_cal = None
+            if request.calibration_file:
+                calibration_path = Path(request.calibration_file).expanduser()
+                if not calibration_path.is_file():
+                    raise FileNotFoundError(f"Calibration JSON not found: {calibration_path}")
+                calibration_data = json.loads(calibration_path.read_text(encoding="utf-8"))
+                camera_cal = calibration_data.get("camera")
+                laser_cal = calibration_data.get("laser")
+                if not camera_cal or not laser_cal:
+                    raise ValueError("Calibration JSON must contain both 'camera' and 'laser' objects.")
+            self._init_live_reconstruction(cfg, camera_cal, laser_cal, request.speed_mm_s)
+            self._start_preview_worker()
+            try:
+                record_hardware_session(
+                    session_dir, cfg=cfg, camera_cal_dict=camera_cal, laser_cal_dict=laser_cal,
+                    frame_callback=self._on_frame, stop_event=self._stop_event,
+                )
+            finally:
+                self._stop_preview_worker()
+            # Preserve jaw and processing settings for later CLI runs or segmentation retries.
+            meta_path = session_dir / "meta.json"
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta["jaw"] = request.jaw
+            meta.setdefault("config", {})["jaw"] = request.jaw
+            meta["config"]["dashboard"] = {"mesh_method": request.mesh_method, "speed_mm_s": request.speed_mm_s}
+            meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            count = self.snapshot()["frame"]
+            self._update(
+                phase="captured", stage="captured", progress=100.0,
+                message=f"Capture saved · {count} frames recorded.",
+            )
+            self._process_scan(request, session_dir, results_dir)
+        except Exception as exc:
+            self._update(phase="error", stage="error", error=str(exc), message="Capture stopped because an error occurred.")
+
+    def start_segmentation(self, request: SegmentationRequest) -> dict:
+        snap = self.snapshot()
+        if snap["phase"] in {"capturing", "processing"}:
+            raise HTTPException(409, "A processing job is already running.")
+        if self.results_dir is None or not (self.results_dir / "reconstructed_mesh.ply").is_file():
+            raise HTTPException(409, "Complete a scan and reconstruction before segmentation.")
+        self._update(phase="processing", stage="segmenting", progress=0.0,
+                     error=None, message="Starting MeshSegNet segmentation…")
+        worker = threading.Thread(
+            target=self._segmentation_worker, args=(request,),
+            name="ioscan-dashboard-segmentation", daemon=True,
+        )
+        worker.start()
+        return {"started": True}
+
+    def _segmentation_worker(self, request: SegmentationRequest) -> None:
+        try:
+            from ioscan.pipeline.segment import SegmentConfig, segment_mesh_and_cloud
+            kwargs = {"jaw": request.jaw}
+            if request.models_dir:
+                kwargs["models_dir"] = Path(request.models_dir).expanduser()
+            mesh_path = self.results_dir / "reconstructed_mesh.ply"
+            cloud_path = self.results_dir / "fused_cloud.ply"
+            seg = segment_mesh_and_cloud(
+                mesh_path, self.results_dir, cfg=SegmentConfig(**kwargs),
+                cloud_path=cloud_path if cloud_path.is_file() else None,
+                session_hint=self.session_dir or "",
+                progress_callback=lambda e: self._update(
+                    stage="segmenting", progress=float(e.get("progress", 0.0)),
+                    message=e.get("message", "Running MeshSegNet inference…"),
+                ),
+            )
+            current_outputs = self.snapshot().get("outputs", {})
+            self._update(
+                phase="complete", stage="complete", progress=100.0,
+                model_asset="segmented", model_revision=self.snapshot()["model_revision"] + 1,
+                segmentation=seg,
+                outputs={**current_outputs, "segmented": seg["full_colored_ply"], "teeth": seg.get("clean_teeth_ply")},
+                warnings=list(self.snapshot().get("warnings", [])) + list(seg["warnings"]),
+                error=None,
+                message=f"MeshSegNet complete · {len(seg['per_tooth_meshes'])} tooth classes detected.",
+            )
+        except Exception as exc:
+            self._update(phase="complete_with_warnings", stage="segmentation_error",
+                         error=str(exc), message="Reconstruction is ready, but segmentation could not complete.")
+
+    def _load_pipeline_script(self):
+        script = self.project_root / "scripts" / "run_pipeline.py"
+        if not script.is_file():
+            raise FileNotFoundError(f"Pipeline script not found: {script}")
+        spec = importlib.util.spec_from_file_location("ioscan_dashboard_pipeline", script)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("Could not load the reconstruction pipeline module.")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def _process_scan(self, request: CaptureRequest, session_dir: Path, results_dir: Path) -> None:
+        try:
+            self._update(phase="processing", stage="reconstructing", progress=0.0,
+                         message="Triangulating laser profiles and building the 3D scan…")
+            pipeline = self._load_pipeline_script()
+
+            def pipeline_progress(event: dict) -> None:
+                updates = {
+                    "stage": event.get("stage", "reconstructing"),
+                    "progress": float(event.get("progress", 0.0)),
+                    "message": event.get("message") or "Reconstructing scan surface…",
+                    "processed_frames": event.get("frames_done", self.snapshot()["processed_frames"]),
+                    "frames_total": event.get("frames_total", request.frames),
+                    "point_count": event.get("triangulated_points", self.snapshot()["point_count"]),
+                }
+                if event.get("preview_path"):
+                    updates["model_asset"] = "preview"
+                    updates["model_revision"] = self.snapshot()["model_revision"] + 1
+                if event.get("stage") == "mesh_ready":
+                    updates["model_asset"] = "mesh"
+                    updates["model_revision"] = self.snapshot()["model_revision"] + 1
+                self._update(**updates)
+
+            stats = pipeline.run_pipeline(
+                session_dir=session_dir, out_dir=results_dir, pose_mode="imu_hybrid",
+                mesh_method=request.mesh_method, speed_mm_s=request.speed_mm_s,
+                segment=False, progress_callback=pipeline_progress,
+            )
+            mesh_path = Path(stats["paths"]["mesh_ply"])
+            self._update(
+                stage="reconstructed", progress=100.0, model_asset="mesh",
+                model_revision=self.snapshot()["model_revision"] + 1,
+                mesh_vertices=int(stats["mesh_vertices"]), mesh_faces=int(stats["mesh_triangles"]),
+                point_count=int(stats["fused_cloud_points"]), trajectory_mm=round(float(stats["path_mm"]), 2),
+                warnings=list(stats["warnings"]),
+                outputs={"mesh": str(mesh_path), "cloud": str(stats["paths"]["cloud_ply"])},
+                message="3D reconstruction complete.",
+            )
+
+            if request.auto_segment:
+                self._update(stage="segmenting", progress=0.0, message="Loading MeshSegNet and segmenting individual teeth…")
+                from ioscan.pipeline.segment import SegmentConfig, segment_mesh_and_cloud
+                models_dir = Path(request.models_dir).expanduser() if request.models_dir else None
+                seg_kwargs = {"jaw": request.jaw}
+                if models_dir is not None:
+                    seg_kwargs["models_dir"] = models_dir
+                seg = segment_mesh_and_cloud(
+                    mesh_path, results_dir,
+                    cfg=SegmentConfig(**seg_kwargs),
+                    cloud_path=Path(stats["paths"]["cloud_ply"]), session_hint=session_dir,
+                    progress_callback=lambda e: self._update(
+                        stage="segmenting", progress=float(e.get("progress", 0.0)),
+                        message=e.get("message", "Running MeshSegNet segmentation…"),
+                    ),
+                )
+                self._update(
+                    phase="complete", stage="complete", progress=100.0,
+                    model_asset="segmented", model_revision=self.snapshot()["model_revision"] + 1,
+                    segmentation=seg,
+                    outputs={
+                        **self.snapshot()["outputs"],
+                        "segmented": seg["full_colored_ply"],
+                        "teeth": seg.get("clean_teeth_ply"),
+                    },
+                    warnings=list(stats["warnings"]) + list(seg["warnings"]),
+                    message=f"Scan and tooth segmentation complete · {len(seg['per_tooth_meshes'])} tooth classes detected.",
+                )
+            else:
+                self._update(phase="complete", stage="complete", progress=100.0, message="3D reconstruction complete.")
+        except Exception as exc:
+            # Keep the reconstruction visible when only the optional segmentation stage fails.
+            snap = self.snapshot()
+            if snap.get("mesh_faces", 0) > 0 or snap.get("outputs", {}).get("mesh"):
+                self._update(phase="complete_with_warnings", stage="segmentation_error",
+                             error=str(exc), message="Reconstruction completed, but a later processing stage failed.")
+            else:
+                self._update(phase="error", stage="error", error=str(exc), message="Reconstruction failed.")
+
+
+def create_app(project_root: str | Path | None = None) -> FastAPI:
+    root = Path(project_root).resolve() if project_root else Path(__file__).resolve().parents[3]
+    controller = ScannerDashboard(root)
+    static_dir = Path(__file__).resolve().parent / "static"
+    app = FastAPI(title="IOSCAN Operator Console", version="0.1.0")
+    app.state.controller = controller
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    @app.get("/", response_class=HTMLResponse)
+    def dashboard_home():
+        return (static_dir / "index.html").read_text(encoding="utf-8")
+
+    @app.get("/api/status")
+    def get_status():
+        return controller.snapshot()
+
+    @app.post("/api/camera/probe")
+    def probe_camera(payload: dict):
+        try:
+            camera_id = int(payload.get("camera_id", 0))
+        except (TypeError, ValueError):
+            raise HTTPException(422, "camera_id must be an integer")
+        return controller.camera_probe(camera_id)
+
+    @app.get("/api/camera/preview.jpg")
+    def camera_preview():
+        with controller._lock:
+            data = controller._latest_jpeg
+        if data is None:
+            return Response(status_code=204)
+        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store, max-age=0"})
+
+    @app.post("/api/capture/start")
+    def start_capture(payload: CaptureRequest):
+        return controller.start_capture(payload)
+
+    @app.post("/api/capture/stop")
+    def stop_capture():
+        return controller.stop_capture()
+
+    @app.post("/api/segmentation/start")
+    def start_segmentation(payload: SegmentationRequest):
+        return controller.start_segmentation(payload)
+
+    @app.get("/api/model/{asset}")
+    def get_model(asset: str):
+        names = {
+            "preview": "reconstruction_preview.ply",
+            "mesh": "reconstructed_mesh.ply",
+            "segmented": "segmented_full_colored.ply",
+            "teeth": "segmented_clean_teeth.ply",
+            "cloud": "fused_cloud.ply",
+        }
+        filename = names.get(asset)
+        if not filename or controller.results_dir is None:
+            raise HTTPException(404, "Model is not available.")
+        path = controller.results_dir / filename
+        if not path.is_file():
+            raise HTTPException(404, "Model is not ready yet.")
+        return FileResponse(path, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/model/tooth/{class_id}")
+    def get_tooth_model(class_id: int):
+        if class_id < 1 or class_id > 14 or controller.results_dir is None:
+            raise HTTPException(404, "Tooth class is not available.")
+        path = controller.results_dir / "segmented_teeth_by_class" / f"tooth_class_{class_id:02d}.ply"
+        if not path.is_file():
+            raise HTTPException(404, "This tooth class was not predicted for the current scan.")
+        return FileResponse(path, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})
+
+    return app

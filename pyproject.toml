@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ioscan"
+version = "0.1.0"
+description = "Laser-line intraoral scanner: simulator, pipeline, and evaluation"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26,<2",
+  "scipy",
+  "opencv-contrib-python>=4.9,<4.12",
+  "open3d",
+  "trimesh",
+  "rtree",
+  "pyyaml",
+  "pydantic>=2",
+  "matplotlib",
+  "tqdm",
+]
+
+[project.optional-dependencies]
+dev = ["pytest","httpx2"]
+hardware = ["pyserial"]
+seg = ["torch>=2.0"]   # MeshSegNet tooth segmentation (scripts/run_segment.py, --segment)
+dashboard = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.setuptools.package-data]
+ioscan = ["dashboard/static/*"]

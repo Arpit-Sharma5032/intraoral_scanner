@@ -1,0 +1,53 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+
+# Data
+data/sessions/*
+!data/sessions/.gitkeep
+data/results/*
+!data/results/.gitkeep
+*.stl
+*.ply
+*.obj
+*.npz
+
+# large binaries
+*.stl
+*.ply
+*.obj
+*.npy
+*.npz
+*.mp4
+*.avi
+!data/README.md
+
+ScreenCamera_*.json
+ScreenCapture_*.png
+
+# model weights / checkpoint archives
+*.pth
+*.pt
+*.ckpt
+*.tar
+*.zip
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+*.bak
+.vscode/
+*.pt
+*.pth
+*.zip
+results/
+data/sessions/*/frames/
+
+data/

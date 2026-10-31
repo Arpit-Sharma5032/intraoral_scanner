@@ -1,0 +1,20 @@
+seed: 0
+teeth3ds:
+  root: null            # null -> $IOSCAN_TEETH3DS (or pass --root on the command line)
+  jaw: lower
+  case_id: FUYJPUPX
+scan:
+  working_distance_mm: 20.0   # camera to cusp tips
+  speed_mm_s: 5.0
+  tremor_mm: 0.0              # 0 = clean motion (v1)
+  tremor_hz: 8.0
+  max_frames: null            # set a number for quick tests
+render:
+  fan_rays: 5000
+  laser_peak_dn: 600.0
+  ambient_dn: 40.0
+  max_dn: 1023                # OV2311 is 10-bit
+  max_gap_mm: 0.15            # break the line across depth jumps larger than this
+  occlusion_tol_mm: 0.02
+imu:
+  rate_hz: 100.0

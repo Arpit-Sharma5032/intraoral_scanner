@@ -1,0 +1,16 @@
+# REFERENCE ONLY: scripts/run_pipeline.py does not read this file. Use its command-line options
+# (--ridge, --mesh, --voxel-mm, --z-min/--z-max, --speed-mm-s, --pose-mode) instead.
+subtraction:
+  min_response_dn: 8
+ridge:
+  method: cog          # cog | gaussian3 | steger
+triangulation:
+  z_range_mm: [10.0, 45.0]
+pose:
+  mode: imu_hybrid
+  nominal_speed_mm_s: 5.0
+fusion:
+  voxel_mm: 0.08
+export:
+  format: stl
+seed: 0

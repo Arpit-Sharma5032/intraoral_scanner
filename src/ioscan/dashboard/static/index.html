@@ -1,0 +1,598 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IOSCAN · Scan Console</title>
+<meta name="color-scheme" content="light dark">
+<script>
+  /* Apply the saved theme before first paint to avoid a flash. */
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem('ioscan.theme'); } catch (e) {}
+    if (t !== 'light' && t !== 'dark') {
+      t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.setAttribute('data-theme', t);
+  })();
+</script>
+
+<style>
+/* ==========================================================================
+   IOSCAN Scan Console — monochrome design system
+   Light = white surfaces / black ink.  Dark = black surfaces / white ink.
+   Colour is reserved for state (ok / warning / error / recording).
+   ========================================================================== */
+:root {
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Cascadia Mono", "SF Mono", Consolas, "Liberation Mono", ui-monospace, monospace;
+
+  --bg: #f2f2f3;
+  --surface: #ffffff;
+  --surface-2: #f8f8f9;
+  --sunken: #ebebed;
+  --line: #e1e1e4;
+  --line-strong: #c6c6cc;
+  --text: #0a0a0b;
+  --text-2: #43434a;
+  --muted: #74747c;
+  --primary: #0a0a0b;
+  --primary-text: #ffffff;
+  --primary-hover: #2a2a2e;
+  --ok: #11703a;
+  --ok-bg: #e7f4ec;
+  --warn: #8f5500;
+  --warn-bg: #fdf1dc;
+  --err: #b42318;
+  --err-bg: #fdeceb;
+  --rec: #d92d20;
+  --focus: #0a0a0b;
+  --vp-bg: #e9e9eb;
+  --cam-bg: #050505;
+  --shadow: 0 1px 2px rgba(0,0,0,.06), 0 8px 24px rgba(0,0,0,.08);
+  --radius: 4px;
+  color-scheme: light;
+}
+[data-theme="dark"] {
+  --bg: #060607;
+  --surface: #0f0f11;
+  --surface-2: #141416;
+  --sunken: #0a0a0b;
+  --line: #242428;
+  --line-strong: #3a3a40;
+  --text: #f3f3f4;
+  --text-2: #c4c4ca;
+  --muted: #8a8a93;
+  --primary: #f3f3f4;
+  --primary-text: #0a0a0b;
+  --primary-hover: #d9d9dc;
+  --ok: #4cc380;
+  --ok-bg: #0f2a1a;
+  --warn: #e3a64a;
+  --warn-bg: #2b1f0a;
+  --err: #f2766b;
+  --err-bg: #2f1411;
+  --rec: #ff5a4d;
+  --focus: #f3f3f4;
+  --vp-bg: #0b0b0c;
+  --cam-bg: #000000;
+  --shadow: 0 1px 2px rgba(0,0,0,.5), 0 8px 24px rgba(0,0,0,.6);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font: 13px/1.45 var(--font-ui);
+  color: var(--text);
+  background: var(--bg);
+  display: grid;
+  grid-template-rows: 48px minmax(0, 1fr) 26px;
+  height: 100vh;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+}
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+[hidden] { display: none !important; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.mono { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0; }
+.label { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+
+/* ---------- App bar ---------- */
+.appbar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 24px;
+  padding: 0 14px 0 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand-mark { width: 22px; height: 22px; background: var(--primary); color: var(--primary-text); display: grid; place-items: center; border-radius: 3px; }
+.brand-mark svg { width: 14px; height: 14px; stroke-width: 2; }
+.brand-name { font-weight: 700; letter-spacing: .14em; font-size: 13px; }
+.brand-sub { color: var(--muted); font-size: 12px; padding-left: 10px; border-left: 1px solid var(--line-strong); margin-left: 2px; }
+
+.workflow { display: flex; align-items: center; justify-content: center; gap: 0; min-width: 0; }
+.wf-step { display: flex; align-items: center; gap: 8px; padding: 0 14px; height: 48px; position: relative; color: var(--muted); white-space: nowrap; }
+.wf-step + .wf-step::before { content: ""; position: absolute; left: -2px; top: 50%; width: 5px; height: 5px; border-top: 1px solid var(--line-strong); border-right: 1px solid var(--line-strong); transform: translateY(-50%) rotate(45deg); }
+.wf-num { width: 18px; height: 18px; border: 1px solid var(--line-strong); border-radius: 50%; display: grid; place-items: center; font-size: 10px; font-weight: 600; font-family: var(--font-mono); background: var(--surface); }
+.wf-name { font-weight: 600; font-size: 12.5px; }
+.wf-state { font-size: 11px; color: var(--muted); }
+.wf-step.active { color: var(--text); }
+.wf-step.active .wf-num { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
+.wf-step.active::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: -1px; height: 2px; background: var(--primary); }
+.wf-step.done { color: var(--text-2); }
+.wf-step.done .wf-num { border-color: var(--ok); color: var(--ok); }
+.wf-step.error { color: var(--err); }
+.wf-step.error .wf-num { border-color: var(--err); color: var(--err); }
+.wf-step.skipped { opacity: .6; }
+
+.appbar-right { display: flex; align-items: center; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius); font-size: 12px; color: var(--text-2); background: var(--surface); white-space: nowrap; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line-strong); flex: none; }
+.dot.ok { background: var(--ok); }
+.dot.warn { background: var(--warn); }
+.dot.err { background: var(--err); }
+.dot.live { background: var(--ok); animation: pulse 1.2s ease-in-out infinite; }
+.dot.rec { background: var(--rec); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+.icon-btn { width: 28px; height: 28px; display: grid; place-items: center; background: transparent; border: 1px solid transparent; border-radius: var(--radius); color: var(--text-2); }
+.icon-btn:hover:not(:disabled) { background: var(--sunken); border-color: var(--line); color: var(--text); }
+.icon-btn:disabled { opacity: .4; cursor: not-allowed; }
+.sep { width: 1px; height: 20px; background: var(--line); margin: 0 4px; }
+
+/* ---------- Layout ---------- */
+.main { display: grid; grid-template-columns: minmax(0, 1fr) 396px; min-height: 0; }
+.stage { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; }
+
+/* ---------- Readouts ---------- */
+.readouts { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); background: var(--surface); border-bottom: 1px solid var(--line); }
+.readout { padding: 9px 16px 10px; border-right: 1px solid var(--line); min-width: 0; }
+.readout:last-child { border-right: 0; }
+.readout .val { font: 600 20px/1.2 var(--font-mono); letter-spacing: -.01em; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.readout .val small { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 3px; }
+.readout .sub { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.readout .sub.warn { color: var(--warn); font-weight: 600; }
+
+/* ---------- Viewport ---------- */
+.viewport { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; background: var(--surface); }
+.vp-toolbar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.vp-toolbar .grow { flex: 1; }
+.seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+.seg button { border: 0; background: transparent; padding: 0 11px; height: 26px; font-size: 12px; color: var(--text-2); border-right: 1px solid var(--line); }
+.seg button:last-child { border-right: 0; }
+.seg button:hover:not(:disabled):not(.on) { background: var(--sunken); }
+.seg button.on { background: var(--primary); color: var(--primary-text); }
+.seg button:disabled { opacity: .35; cursor: not-allowed; }
+.vp-select { height: 28px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); padding: 0 8px; font-size: 12px; }
+
+.vp-canvas { position: relative; background: var(--vp-bg); min-height: 0; overflow: hidden; }
+.vp-canvas canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.vp-empty { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 6px; text-align: center; color: var(--muted); padding: 24px; pointer-events: none; }
+.vp-empty b { color: var(--text-2); font-weight: 600; font-size: 14px; }
+.vp-empty svg { width: 34px; height: 34px; stroke-width: 1.1; margin-bottom: 6px; }
+.vp-tag { position: absolute; top: 10px; left: 12px; display: flex; gap: 6px; align-items: center; pointer-events: none; }
+.tag { font: 600 10.5px/1 var(--font-mono); letter-spacing: .06em; padding: 5px 7px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 2px; color: var(--text); text-transform: uppercase; }
+.tag.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }
+.vp-hint { position: absolute; right: 12px; bottom: 10px; font-size: 11px; color: var(--muted); pointer-events: none; }
+.vp-foot { display: flex; align-items: center; gap: 18px; padding: 7px 14px; border-top: 1px solid var(--line); color: var(--text-2); font-size: 12px; overflow: hidden; white-space: nowrap; }
+.vp-foot .kv { display: flex; gap: 6px; align-items: baseline; }
+.vp-foot .kv span:first-child { color: var(--muted); font-size: 11px; letter-spacing: .05em; text-transform: uppercase; font-weight: 600; }
+
+/* ---------- Side panel ---------- */
+.side { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; background: var(--surface); border-left: 1px solid var(--line); }
+.tabs { display: flex; border-bottom: 1px solid var(--line); }
+.tab { flex: 1; height: 38px; border: 0; background: transparent; color: var(--muted); font-weight: 600; font-size: 12.5px; position: relative; display: flex; align-items: center; justify-content: center; gap: 6px; }
+.tab:hover { color: var(--text); background: var(--surface-2); }
+.tab[aria-selected="true"] { color: var(--text); }
+.tab[aria-selected="true"]::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--primary); }
+.tab .count { font: 600 10px var(--font-mono); background: var(--primary); color: var(--primary-text); border-radius: 8px; padding: 1px 6px; }
+.side-body { overflow: auto; min-height: 0; }
+.pane { display: none; }
+.pane.on { display: block; }
+.section { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.section:last-child { border-bottom: 0; }
+.section-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.section-h h3 { margin: 0; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); }
+
+/* Camera */
+.cam { position: relative; aspect-ratio: 1600 / 1200; background: var(--cam-bg); border: 1px solid var(--line-strong); border-radius: var(--radius); overflow: hidden; }
+.cam img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.cam-empty { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 8px; color: #8d8d95; text-align: center; padding: 16px; }
+.cam-empty svg { width: 28px; height: 28px; stroke-width: 1.2; }
+.cam-empty b { color: #cfcfd4; font-weight: 600; }
+.cam-hud { position: absolute; left: 8px; right: 8px; top: 8px; display: flex; justify-content: space-between; pointer-events: none; }
+.hud { font: 600 10.5px/1 var(--font-mono); letter-spacing: .05em; padding: 5px 7px; background: rgba(0,0,0,.72); color: #f2f2f3; border-radius: 2px; display: inline-flex; align-items: center; gap: 6px; text-transform: uppercase; }
+.cam-crosshair { position: absolute; inset: 0; pointer-events: none; opacity: .0; }
+.cam-meta { display: flex; justify-content: space-between; margin-top: 7px; font-size: 12px; color: var(--text-2); }
+
+/* Progress */
+.progress { height: 4px; background: var(--sunken); border-radius: 2px; overflow: hidden; margin: 8px 0 6px; }
+.progress > i { display: block; height: 100%; width: 0; background: var(--primary); transition: width .35s ease; }
+.progress.indeterminate > i { width: 35%; animation: slide 1.1s linear infinite; }
+@keyframes slide { from { margin-left: -35%; } to { margin-left: 100%; } }
+.prog-row { display: flex; justify-content: space-between; align-items: baseline; }
+.prog-title { font-weight: 600; font-size: 13px; }
+.stages { margin: 12px 0 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: var(--radius); }
+.stages li { display: grid; grid-template-columns: 22px 1fr auto; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.stages li:last-child { border-bottom: 0; }
+.stages .n { font: 600 11px var(--font-mono); color: var(--muted); }
+.stages .st { font: 600 10.5px var(--font-mono); letter-spacing: .06em; color: var(--muted); }
+.stages li.active .st { color: var(--text); }
+.stages li.active { background: var(--surface-2); }
+.stages li.done .st { color: var(--ok); }
+.stages li.error .st { color: var(--err); }
+.status-msg { margin-top: 10px; color: var(--text-2); font-size: 12.5px; min-height: 18px; }
+
+/* Alerts */
+.alert { display: grid; grid-template-columns: 16px 1fr auto; gap: 9px; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); font-size: 12.5px; margin-bottom: 8px; background: var(--surface-2); }
+.alert svg { margin-top: 2px; }
+.alert.err { border-color: var(--err); background: var(--err-bg); color: var(--err); }
+.alert.warn { border-color: var(--warn); background: var(--warn-bg); color: var(--warn); }
+.alert.ok { border-color: var(--ok); background: var(--ok-bg); color: var(--ok); }
+.alert .body { color: var(--text); }
+.alert .body b { display: block; color: inherit; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 1px; }
+.alert.err .body b { color: var(--err); } .alert.warn .body b { color: var(--warn); } .alert.ok .body b { color: var(--ok); }
+.alert .x { background: none; border: 0; color: inherit; padding: 0; opacity: .7; }
+.alert .x:hover { opacity: 1; }
+.warn-list { margin: 0; padding: 0; list-style: none; }
+.warn-list li { display: grid; grid-template-columns: 74px 1fr; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; color: var(--text-2); }
+.warn-list li:last-child { border-bottom: 0; }
+.warn-list .k { font: 600 10.5px var(--font-mono); letter-spacing: .05em; text-transform: uppercase; color: var(--warn); padding-top: 2px; }
+.warn-list .k.info { color: var(--muted); }
+
+/* Forms */
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+.field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.field.full { grid-column: 1 / -1; }
+.field > label, .field > .lbl { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.field .hint { font-size: 11.5px; color: var(--muted); }
+.input, .field select {
+  height: 30px; width: 100%; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--radius);
+  background: var(--surface); color: var(--text); min-width: 0;
+}
+.input.mono { font-family: var(--font-mono); font-size: 12px; }
+.input:hover, .field select:hover { border-color: var(--muted); }
+.input:focus-visible, .field select:focus-visible { outline: 2px solid var(--focus); outline-offset: 0; border-color: var(--focus); }
+.input.invalid { border-color: var(--err); }
+.field .err-msg { color: var(--err); font-size: 11.5px; }
+.input-affix { position: relative; }
+.input-affix .input { padding-right: 44px; }
+.input-affix .affix { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); font: 11px var(--font-mono); color: var(--muted); pointer-events: none; }
+.check { display: grid; grid-template-columns: 16px 1fr; gap: 9px; align-items: start; cursor: pointer; }
+.check input { appearance: none; margin: 2px 0 0; width: 16px; height: 16px; border: 1px solid var(--line-strong); border-radius: 3px; background: var(--surface); display: grid; place-content: center; cursor: pointer; }
+.check input:checked { background: var(--primary); border-color: var(--primary); }
+.check input:checked::after { content: ""; width: 8px; height: 4px; border-left: 2px solid var(--primary-text); border-bottom: 2px solid var(--primary-text); transform: rotate(-45deg) translate(1px, -1px); }
+.check b { font-weight: 600; display: block; }
+.check small { color: var(--muted); font-size: 11.5px; }
+.group-gap { height: 16px; }
+
+/* Buttons */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 32px; padding: 0 14px; border-radius: var(--radius); border: 1px solid var(--line-strong); background: var(--surface); color: var(--text); font-weight: 600; font-size: 12.5px; white-space: nowrap; }
+.btn:hover:not(:disabled) { background: var(--sunken); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn.primary { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
+.btn.primary:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); }
+.btn.danger { color: var(--err); border-color: var(--err); }
+.btn.danger:hover:not(:disabled) { background: var(--err-bg); }
+.btn.sm { height: 26px; padding: 0 10px; font-size: 12px; }
+.btn.block { width: 100%; }
+
+.action-bar { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--surface); }
+.action-bar .btn { height: 36px; font-size: 13px; }
+
+/* Outputs */
+.file-list { border: 1px solid var(--line); border-radius: var(--radius); }
+.file { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.file:last-child { border-bottom: 0; }
+.file .ext { font: 600 10.5px var(--font-mono); color: var(--muted); border: 1px solid var(--line-strong); border-radius: 2px; padding: 2px 5px; }
+.file .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file .name small { display: block; color: var(--muted); font-size: 11.5px; }
+.empty { padding: 18px 12px; text-align: center; color: var(--muted); font-size: 12.5px; border: 1px dashed var(--line-strong); border-radius: var(--radius); }
+.kv-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.kv-table td { padding: 6px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.kv-table tr:last-child td { border-bottom: 0; }
+.kv-table td:first-child { color: var(--muted); width: 42%; }
+.kv-table td:last-child { text-align: right; font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+.path-row { display: flex; gap: 6px; align-items: center; }
+.path-row .mono { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); direction: rtl; text-align: left; }
+.tooth { display: grid; grid-template-columns: 14px 1fr auto auto; gap: 10px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.tooth:last-child { border-bottom: 0; }
+.tooth.sel { background: var(--surface-2); }
+.swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid rgba(128,128,128,.5); }
+.link-btn { background: none; border: 0; padding: 0; color: var(--text); text-decoration: underline; text-underline-offset: 2px; font-size: 12px; }
+.link-btn:hover { color: var(--muted); }
+a.link-btn { display: inline-flex; align-items: center; gap: 4px; }
+
+/* ---------- Status bar ---------- */
+.statusbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 14px; background: var(--surface); border-top: 1px solid var(--line); font-size: 11.5px; color: var(--muted); overflow: hidden; white-space: nowrap; }
+.statusbar .msg { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- Toasts ---------- */
+.toasts { position: fixed; right: 14px; bottom: 40px; display: flex; flex-direction: column; gap: 8px; z-index: 50; max-width: 420px; }
+.toast { background: var(--primary); color: var(--primary-text); border-radius: var(--radius); padding: 10px 12px; font-size: 12.5px; box-shadow: var(--shadow); display: grid; grid-template-columns: 1fr auto; gap: 10px; }
+.toast.err { background: var(--err); color: #fff; }
+.toast button { background: none; border: 0; color: inherit; opacity: .8; padding: 0; }
+
+.offline-banner { position: fixed; left: 0; right: 0; top: 48px; background: var(--err); color: #fff; padding: 6px 14px; text-align: center; font-size: 12.5px; font-weight: 600; z-index: 40; }
+
+/* ---------- Responsive ---------- */
+@media (max-width: 1080px) {
+  body { display: block; height: auto; overflow: auto; }
+  .appbar { grid-template-columns: auto 1fr auto; position: sticky; top: 0; z-index: 10; }
+  .workflow { display: none; }
+  .main { display: block; }
+  .stage { display: block; }
+  .vp-canvas { height: 56vh; min-height: 340px; }
+  .side { border-left: 0; border-top: 1px solid var(--line); display: block; }
+  .readouts { grid-template-columns: repeat(3, 1fr); }
+  .readout { border-bottom: 1px solid var(--line); }
+  .statusbar { position: sticky; bottom: 0; }
+  .brand-sub { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<!-- 3D engine. For offline workstations, download these three files from the three@0.161.0 package
+     into /static/vendor/ and change the URLs below to /static/vendor/... -->
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.161.0/examples/jsm/"
+} }
+</script>
+</head>
+
+<body>
+<!-- SVG icon sprite -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-scan" viewBox="0 0 16 16"><path d="M2 5V2.5h3M11 2.5h3V5M14 11v2.5h-3M5 13.5H2V11M1.5 8h13"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 16 16"><path d="M13.5 9.6A5.7 5.7 0 0 1 6.4 2.5a5.7 5.7 0 1 0 7.1 7.1z"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 16 16"><path d="M1.8 5h2.4l1-1.6h5.6l1 1.6h2.4v7.5H1.8z"/><circle cx="8" cy="8.6" r="2.4"/></symbol>
+    <symbol id="i-cube" viewBox="0 0 16 16"><path d="M8 1.5 14 4.7v6.6L8 14.5 2 11.3V4.7zM2 4.7 8 8l6-3.3M8 8v6.5"/></symbol>
+    <symbol id="i-reset" viewBox="0 0 16 16"><path d="M2.5 8a5.5 5.5 0 1 0 1.8-4.1M2.5 2.5v3h3"/></symbol>
+    <symbol id="i-shot" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1"/><circle cx="8" cy="8" r="2.3"/></symbol>
+    <symbol id="i-down" viewBox="0 0 16 16"><path d="M8 2.5v8M4.7 7.5 8 10.8l3.3-3.3M2.5 13.5h11"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5.5" y="5.5" width="8" height="8" rx="1"/><path d="M10.5 5.5v-3h-8v8h3"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 16 16"><path d="M8 1.8 14.6 13.5H1.4zM8 6.2v3.4M8 11.6v.1"/></symbol>
+    <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v4M8 4.9v.1"/></symbol>
+    <symbol id="i-check" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2"/><path d="m5.2 8.2 2 2 3.7-4"/></symbol>
+    <symbol id="i-x" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+    <symbol id="i-play" viewBox="0 0 16 16"><path d="M4.5 2.8v10.4L13 8z" fill="currentColor"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1" fill="currentColor"/></symbol>
+  </defs>
+</svg>
+
+<!-- ============================ APP BAR ============================ -->
+<header class="appbar">
+  <div class="brand">
+    <div class="brand-mark"><svg class="i"><use href="#i-scan"/></svg></div>
+    <span class="brand-name">IOSCAN</span>
+    <span class="brand-sub">Scan Console</span>
+  </div>
+
+  <nav class="workflow" aria-label="Scan workflow">
+    <div class="wf-step" id="wf-capture"><span class="wf-num">1</span><span class="wf-name">Acquire</span><span class="wf-state" id="wf-capture-s">Idle</span></div>
+    <div class="wf-step" id="wf-reconstruct"><span class="wf-num">2</span><span class="wf-name">Reconstruct</span><span class="wf-state" id="wf-reconstruct-s">Waiting</span></div>
+    <div class="wf-step" id="wf-segment"><span class="wf-num">3</span><span class="wf-name">Segment</span><span class="wf-state" id="wf-segment-s">Waiting</span></div>
+  </nav>
+
+  <div class="appbar-right">
+    <span class="chip" id="chip-server" title="Dashboard service"><span class="dot" id="dot-server"></span>Service</span>
+    <span class="chip" id="chip-camera" title="USB camera"><span class="dot" id="dot-camera"></span><span id="txt-camera">Camera · not tested</span></span>
+    <span class="chip" id="chip-imu" title="ESP32 / BNO086 serial stream"><span class="dot" id="dot-imu"></span><span id="txt-imu">IMU · idle</span></span>
+    <span class="sep"></span>
+    <button class="icon-btn" id="theme-toggle" title="Switch light / dark theme" aria-label="Switch theme">
+      <svg class="i" id="theme-icon"><use href="#i-moon"/></svg>
+    </button>
+  </div>
+</header>
+
+<div class="offline-banner" id="offline-banner" hidden>Connection to the scanner service was lost. Retrying…</div>
+
+<!-- ============================== MAIN ============================== -->
+<main class="main">
+  <section class="stage" aria-label="Scan review">
+    <div class="readouts" id="readouts">
+      <div class="readout"><div class="label">Frames</div><div class="val" id="ro-frames">—</div><div class="sub" id="ro-frames-sub">Not recording</div></div>
+      <div class="readout"><div class="label">Frame rate</div><div class="val" id="ro-fps">—<small>fps</small></div><div class="sub" id="ro-fps-sub">Target 50 fps</div></div>
+      <div class="readout"><div class="label" id="ro-points-label">Points</div><div class="val" id="ro-points">—</div><div class="sub" id="ro-points-sub">Triangulated</div></div>
+      <div class="readout"><div class="label">Mesh faces</div><div class="val" id="ro-faces">—</div><div class="sub" id="ro-faces-sub">No surface yet</div></div>
+      <div class="readout"><div class="label">Scan path</div><div class="val" id="ro-path">—<small>mm</small></div><div class="sub" id="ro-path-sub">Estimated trajectory</div></div>
+    </div>
+
+    <div class="viewport">
+      <div class="vp-toolbar">
+        <div class="seg" role="group" aria-label="Model source" id="seg-source">
+          <button data-src="auto" class="on">Auto</button>
+          <button data-src="preview">Live cloud</button>
+          <button data-src="mesh">Mesh</button>
+          <button data-src="segmented">Segmented</button>
+          <button data-src="teeth">Teeth</button>
+        </div>
+        <div class="seg" role="group" aria-label="Display mode" id="seg-display">
+          <button data-disp="shaded" class="on">Shaded</button>
+          <button data-disp="wire">Wireframe</button>
+          <button data-disp="points">Points</button>
+        </div>
+        <span class="grow"></span>
+        <select class="vp-select" id="view-preset" aria-label="Camera view">
+          <option value="iso">View · Isometric</option>
+          <option value="-z">View · Scanner (−Z)</option>
+          <option value="+z">View · Rear (+Z)</option>
+          <option value="-x">View · Left (−X)</option>
+          <option value="+x">View · Right (+X)</option>
+          <option value="-y">View · Top (−Y)</option>
+          <option value="+y">View · Bottom (+Y)</option>
+        </select>
+        <button class="icon-btn" id="btn-fit" title="Fit model to view" aria-label="Fit model to view"><svg class="i"><use href="#i-reset"/></svg></button>
+        <button class="icon-btn" id="btn-shot" title="Save view as PNG" aria-label="Save view as PNG"><svg class="i"><use href="#i-shot"/></svg></button>
+      </div>
+
+      <div class="vp-canvas" id="viewer">
+        <div class="vp-empty" id="viewer-empty">
+          <svg class="i"><use href="#i-cube"/></svg>
+          <b id="viewer-empty-title">No geometry</b>
+          <span id="viewer-empty-sub">The fused point cloud appears here while the scan is recording.</span>
+        </div>
+        <div class="vp-tag"><span class="tag" id="tag-asset" hidden></span><span class="tag warn" id="tag-nominal" hidden>Nominal calibration · not for measurement</span></div>
+        <div class="vp-hint" id="vp-hint" hidden>Left drag: rotate · Right drag: pan · Wheel: zoom</div>
+      </div>
+
+      <div class="vp-foot">
+        <div class="kv"><span>Source</span><span id="vf-source">—</span></div>
+        <div class="kv"><span>Vertices</span><span class="mono" id="vf-verts">—</span></div>
+        <div class="kv"><span>Faces</span><span class="mono" id="vf-faces">—</span></div>
+        <div class="kv"><span>Extent</span><span class="mono" id="vf-bbox">—</span></div>
+        <div class="kv" style="margin-left:auto"><span>Units</span><span>mm</span></div>
+      </div>
+    </div>
+  </section>
+
+  <aside class="side" aria-label="Scan controls">
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" id="tab-scan" aria-selected="true" aria-controls="pane-scan" data-tab="scan">Scan</button>
+      <button class="tab" role="tab" id="tab-setup" aria-selected="false" aria-controls="pane-setup" data-tab="setup">Setup</button>
+      <button class="tab" role="tab" id="tab-export" aria-selected="false" aria-controls="pane-export" data-tab="export">Results <span class="count" id="export-count" hidden>0</span></button>
+    </div>
+
+    <div class="side-body">
+      <!-- ---------------- SCAN ---------------- -->
+      <div class="pane on" id="pane-scan" role="tabpanel" aria-labelledby="tab-scan">
+        <div class="section">
+          <div class="section-h"><h3>Camera</h3><span class="mono" id="cam-res" style="color:var(--muted)">1600 × 1200</span></div>
+          <div class="cam" id="cam">
+            <img id="cam-img" alt="Live scanner camera frame" hidden>
+            <div class="cam-empty" id="cam-empty">
+              <svg class="i"><use href="#i-camera"/></svg>
+              <b>No camera signal</b>
+              <span>Check the camera to confirm the USB device responds.</span>
+              <button class="btn sm" id="btn-probe-empty">Check camera</button>
+            </div>
+            <div class="cam-hud" id="cam-hud" hidden>
+              <span class="hud" id="hud-rec"><span class="dot"></span><span id="hud-rec-t">Standby</span></span>
+              <span class="hud" id="hud-laser">Laser · —</span>
+            </div>
+          </div>
+          <div class="cam-meta"><span id="cam-meta-l">Camera not tested</span><span class="mono" id="cam-meta-r">Frame — / —</span></div>
+        </div>
+
+        <div class="section" id="sec-alerts" hidden>
+          <div id="alerts"></div>
+        </div>
+
+        <div class="section">
+          <div class="section-h"><h3>Processing</h3><span class="mono" id="prog-pct">0%</span></div>
+          <div class="prog-row"><span class="prog-title" id="prog-title">System ready</span><span class="mono" style="color:var(--muted)" id="prog-count">—</span></div>
+          <div class="progress" id="progress"><i id="progress-bar"></i></div>
+          <ul class="stages">
+            <li id="st-capture"><span class="n">01</span><span>Capture frames</span><span class="st">READY</span></li>
+            <li id="st-reconstruct"><span class="n">02</span><span>Build 3D surface</span><span class="st">WAITING</span></li>
+            <li id="st-segment"><span class="n">03</span><span>Tooth segmentation</span><span class="st">WAITING</span></li>
+          </ul>
+          <div class="status-msg" id="status-msg" aria-live="polite">Check the camera, review the setup, then start a scan.</div>
+        </div>
+
+        <div class="section" id="sec-warnings" hidden>
+          <div class="section-h"><h3>Scan notices</h3><span class="mono" style="color:var(--muted)" id="warn-count"></span></div>
+          <ul class="warn-list" id="warn-list"></ul>
+        </div>
+      </div>
+
+      <!-- ---------------- SETUP ---------------- -->
+      <div class="pane" id="pane-setup" role="tabpanel" aria-labelledby="tab-setup">
+        <div class="section">
+          <div class="section-h"><h3>Devices</h3><button class="btn sm" id="btn-probe">Check camera</button></div>
+          <div class="form-grid">
+            <div class="field"><label for="camera-id">Camera index</label><input class="input mono" id="camera-id" type="number" min="0" max="16" step="1" value="0"><span class="err-msg" id="e-camera-id" hidden></span></div>
+            <div class="field"><label for="exposure">Exposure</label><input class="input mono" id="exposure" type="number" min="-13" max="0" step="1" value="-7"><span class="err-msg" id="e-exposure" hidden></span></div>
+            <div class="field full"><label for="serial-port">ESP32 serial port</label><input class="input mono" id="serial-port" type="text" value="COM3" placeholder="COM3" spellcheck="false" autocomplete="off"><span class="err-msg" id="e-serial-port" hidden></span><span class="hint">Close Arduino Serial Monitor first. Only one process can own the port.</span></div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-h"><h3>Acquisition</h3></div>
+          <div class="form-grid">
+            <div class="field full"><label for="session-name">Session name</label><input class="input mono" id="session-name" type="text" placeholder="auto: scan_YYYYMMDD_HHMMSS" spellcheck="false" autocomplete="off"><span class="err-msg" id="e-session-name" hidden></span></div>
+            <div class="field"><label for="frame-count">Frame limit</label><input class="input mono" id="frame-count" type="number" min="20" max="20000" step="10" value="1200"><span class="err-msg" id="e-frame-count" hidden></span></div>
+            <div class="field"><label for="speed">Assumed scan speed</label><div class="input-affix"><input class="input mono" id="speed" type="number" min="0.1" max="50" step="0.1" value="5.0"><span class="affix">mm/s</span></div><span class="err-msg" id="e-speed" hidden></span></div>
+          </div>
+          <div class="hint" style="margin-top:8px;color:var(--muted);font-size:11.5px">The IMU supplies orientation only. Translation along the scan axis is computed from this assumed speed.</div>
+        </div>
+
+        <div class="section">
+          <div class="section-h"><h3>Reconstruction</h3></div>
+          <div class="form-grid">
+            <div class="field"><label for="jaw">Jaw</label><select id="jaw"><option value="lower">Lower · Man</option><option value="upper">Upper · Max</option></select></div>
+            <div class="field"><label for="mesh-method">Meshing</label><select id="mesh-method"><option value="bpa">Ball pivoting</option><option value="poisson">Poisson</option><option value="tsdf">TSDF</option></select></div>
+            <div class="field full"><label for="calibration-file">Calibration JSON</label><input class="input mono" id="calibration-file" type="text" placeholder="C:\path\to\calibration.json" spellcheck="false" autocomplete="off"><span class="hint">Measured camera + laser-plane calibration. Without it, nominal values are used and output is not dimensionally valid.</span></div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-h"><h3>Segmentation</h3></div>
+          <div class="form-grid">
+            <div class="field full"><label for="models-dir">MeshSegNet model folder</label><input class="input mono" id="models-dir" type="text" placeholder="C:\Users\…\MeshSegNet\models" spellcheck="false" autocomplete="off"></div>
+            <div class="field full">
+              <label class="check"><input id="auto-segment" type="checkbox" checked><span><b>Segment teeth after reconstruction</b><small>Loads the selected jaw's 15-class checkpoint before capture starts.</small></span></label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ---------------- RESULTS ---------------- -->
+      <div class="pane" id="pane-export" role="tabpanel" aria-labelledby="tab-export">
+        <div class="section">
+          <div class="section-h"><h3>Files</h3><span class="mono" style="color:var(--muted)" id="file-count">0 files</span></div>
+          <div id="file-list"><div class="empty">Reconstruction outputs appear here once processing finishes.</div></div>
+        </div>
+
+        <div class="section" id="sec-seg" hidden>
+          <div class="section-h"><h3>Tooth segmentation</h3><button class="link-btn" id="btn-show-all" hidden>Show full scan</button></div>
+          <table class="kv-table" id="seg-summary"></table>
+          <div style="height:10px"></div>
+          <div class="file-list" id="tooth-list"></div>
+          <div class="hint" style="margin-top:8px;color:var(--muted);font-size:11.5px">Classes are MeshSegNet output labels. They are not validated FDI/Universal tooth numbers.</div>
+        </div>
+
+        <div class="section">
+          <div class="section-h"><h3>Segmentation</h3></div>
+          <button class="btn block" id="btn-segment" disabled>Run / retry MeshSegNet</button>
+          <div class="hint" style="margin-top:8px;color:var(--muted);font-size:11.5px">Uses the jaw and model folder from Setup on the reconstruction already in memory.</div>
+        </div>
+
+        <div class="section" id="sec-paths" hidden>
+          <div class="section-h"><h3>Storage</h3></div>
+          <div class="label" style="margin-bottom:4px">Session</div>
+          <div class="path-row"><span class="mono" id="path-session" title=""></span><button class="icon-btn" data-copy="path-session" title="Copy path" aria-label="Copy session path"><svg class="i"><use href="#i-copy"/></svg></button></div>
+          <div class="label" style="margin:10px 0 4px">Results</div>
+          <div class="path-row"><span class="mono" id="path-results" title=""></span><button class="icon-btn" data-copy="path-results" title="Copy path" aria-label="Copy results path"><svg class="i"><use href="#i-copy"/></svg></button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="action-bar">
+      <button class="btn primary" id="btn-start"><svg class="i"><use href="#i-play"/></svg><span id="btn-start-t">Start scan</span></button>
+      <button class="btn danger" id="btn-stop" disabled><svg class="i"><use href="#i-stop"/></svg>Stop</button>
+    </div>
+  </aside>
+</main>
+
+<footer class="statusbar">
+  <span class="msg" id="foot-msg">Ready</span>
+  <span>IOSCAN 0.1.0 · Local processing · Engineering build, not a diagnostic device</span>
+</footer>
+
+<div class="toasts" id="toasts" aria-live="assertive"></div>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

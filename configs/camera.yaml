@@ -1,0 +1,11 @@
+name: ov2311_8mm_nominal
+width: 1600
+height: 1200
+fps: 50
+fx: 2666.7
+fy: 2666.7
+cx: 800.0
+cy: 600.0
+dist_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
+pixel_size_um: 3.0
+focal_length_mm: 8.0
