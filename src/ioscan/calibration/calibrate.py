@@ -154,7 +154,15 @@ def fit_laser_plane_from_points(pts_3d_cam: np.ndarray) -> tuple[LaserPlane, flo
 
     centroid = np.mean(pts, axis=0)
     centered = pts - centroid
-    _, _, vh = np.linalg.svd(centered, full_matrices=False)
+    _, singular_values, vh = np.linalg.svd(centered, full_matrices=False)
+    # A single checkerboard pose produces points along (approximately) one line.
+    # Such data cannot define a unique laser plane; require measurable spread in
+    # two independent directions before accepting a calibration.
+    if len(singular_values) < 2 or singular_values[1] <= max(singular_values[0] * 1e-4, 1e-6):
+        raise ValueError(
+            "Laser calibration points are nearly collinear. Capture the checkerboard "
+            "at multiple depths and tilt angles while the laser stripe remains visible."
+        )
     normal = vh[-1, :].copy()
     normal /= np.linalg.norm(normal)
 

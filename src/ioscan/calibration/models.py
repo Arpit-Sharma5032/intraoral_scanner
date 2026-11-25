@@ -170,8 +170,8 @@ class LaserPlane:
     @classmethod
     def from_baseline_and_angle(
         cls,
-        baseline_mm: float = 12.0,
-        angle_deg: float = 30.963756532,
+        baseline_mm: float = 18.0,
+        angle_deg: float = 10.0,
         axis: str = "y",
     ) -> "LaserPlane":
         if not np.isfinite(baseline_mm) or baseline_mm <= 0.0:
@@ -264,8 +264,8 @@ class LaserPlane:
         if vec is not None and "d" in d:
             return cls(normal=np.asarray(vec, dtype=np.float64), d=float(d["d"]))
         return cls.from_baseline_and_angle(
-            baseline_mm=float(d.get("baseline_mm", 12.0)),
-            angle_deg=float(d.get("angle_deg", 30.963756532)),
+            baseline_mm=float(d.get("baseline_mm", 18.0)),
+            angle_deg=float(d.get("angle_deg", 10.0)),
             axis=str(d.get("axis", "y")),
         )
 
@@ -280,7 +280,7 @@ class LaserPlane:
             return cls.from_dict(las)
         geom = las.get("geometry", las)
         return cls.from_baseline_and_angle(
-            baseline_mm=float(geom.get("baseline_mm", 12.0)),
-            angle_deg=float(geom.get("angle_deg", geom.get("tilt_deg", geom.get("convergence_angle_deg", 30.963756532)))),
+            baseline_mm=float(geom.get("baseline_mm", 18.0)),
+            angle_deg=float(geom.get("angle_deg", geom.get("tilt_deg", geom.get("convergence_angle_deg", 10.0)))),
             axis=str(geom.get("baseline_axis", geom.get("axis", "y"))),
         )

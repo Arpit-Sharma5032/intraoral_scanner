@@ -29,11 +29,11 @@ def test_fit_laser_plane_svd_recovers_exact_plane():
 
 
 def test_ray_board_intersection_and_bundle_roundtrip(tmp_path: Path):
-    cam = CameraIntrinsics(width=1600, height=1300, fx=2666.7, fy=2666.7, cx=800.0, cy=650.0)
+    cam = CameraIntrinsics(width=1600, height=1200, fx=2666.7, fy=2666.7, cx=800.0, cy=600.0)
     R_cb, _ = cv2.Rodrigues(np.array([0.1, -0.15, 0.0], dtype=np.float64))
     t_cb = np.array([0.0, 0.0, 22.0], dtype=np.float64)
 
-    uv = np.array([[800.0, 650.0], [600.0, 500.0], [1000.0, 750.0]], dtype=np.float64)
+    uv = np.array([[800.0, 600.0], [600.0, 500.0], [1000.0, 750.0]], dtype=np.float64)
     rays = cam.unproject(uv)
     pts_cam, valid = intersect_rays_with_board_plane(rays, R_cb, t_cb)
 
@@ -46,3 +46,9 @@ def test_ray_board_intersection_and_bundle_roundtrip(tmp_path: Path):
     laser = LaserPlane.from_baseline_and_angle(12.0, 30.96)
     cal_file = save_calibration_bundle(tmp_path / "calibration.json", cam, laser)
     assert cal_file.exists()
+
+def test_fit_laser_plane_rejects_nearly_collinear_calibration_points():
+    points = np.column_stack([np.linspace(-5, 5, 20), np.zeros(20), np.linspace(15, 25, 20)])
+    import pytest
+    with pytest.raises(ValueError, match="nearly collinear"):
+        fit_laser_plane_from_points(points)

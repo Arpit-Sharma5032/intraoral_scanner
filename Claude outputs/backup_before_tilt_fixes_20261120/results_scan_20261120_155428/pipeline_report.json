@@ -1,0 +1,277 @@
+{
+  "session": "E:\\intraoral-scanner-hardware-integration\\intraoral-scanner\\data\\sessions\\scan_20261120_155428",
+  "session_source": "hardware",
+  "pose_mode": "sweep",
+  "laser_flags": {
+    "frames": 3740,
+    "action": "replaced",
+    "score_p15": -125.42,
+    "score_p85": 125.82,
+    "amplitude": 130.82,
+    "agreement": 0.4476,
+    "support": 0.913,
+    "detected_on_fraction": 0.5016,
+    "dropped_frame_gaps": 0,
+    "frames_changed": 2066
+  },
+  "translation": {
+    "requested": "auto",
+    "used": "markers",
+    "path_mm": 255.945,
+    "median_profile_spacing_mm": 0.1181,
+    "extent_along_scan_mm": 43.409,
+    "extent_across_scan_mm": 60.793,
+    "rotation_range_deg": 150.38,
+    "tilt_max_deg": 11.5,
+    "markers": {
+      "samples": 1864,
+      "valid_fraction": 1.0,
+      "median_markers": 25.0,
+      "median_rms_px": 0.986,
+      "pose_outliers_dropped": 6,
+      "plate_plane": "free",
+      "laser_assisted": false,
+      "rotation_range_deg": 150.49,
+      "tilt_range_deg": [
+        6.84,
+        11.5
+      ],
+      "plate_distance_mm": [
+        120.78,
+        138.39
+      ],
+      "path_mm": 261.777,
+      "extent_mm": [
+        60.82,
+        43.44
+      ],
+      "probe": {
+        "mirrored": true,
+        "frames": 25,
+        "frames_with_2plus": 25,
+        "fraction_with_2plus": 1.0,
+        "median_markers": 27.0
+      },
+      "mirrored": true,
+      "board": {
+        "cols": 16,
+        "rows": 14,
+        "marker_mm": 6.0,
+        "pitch_mm": 7.5,
+        "scale": 0.9,
+        "dictionary": "DICT_4X4_250"
+      }
+    }
+  },
+  "active_window": {
+    "auto_trim": false,
+    "mode": "markers: every profile with a line and a plate pose",
+    "kept_profiles": 1857,
+    "dropped_profiles": 17,
+    "profiles_without_pose": 2,
+    "t_start_s": 0.0,
+    "t_end_s": 75.774,
+    "duration_s": 75.774
+  },
+  "profile_cleaning": {
+    "points_in": 429032,
+    "points_kept": 422723,
+    "fraction_kept": 0.9853
+  },
+  "plate_check": {
+    "points_on_sheet": 2680,
+    "offset_mm": 2.816,
+    "spread_mm": 0.172
+  },
+  "pass_alignment": {
+    "applied": true,
+    "segments": 38,
+    "overlap_pairs": 3565,
+    "mismatch_before_mm": 0.239,
+    "mismatch_after_mm": 0.185,
+    "max_offset_mm": 1.537,
+    "max_tilt_mm_per_20mm": 0.023
+  },
+  "profile_outliers": {
+    "dropped": 129,
+    "checked": 1855,
+    "max_offset_mm": 0.35,
+    "offset_spread_mm": 0.148
+  },
+  "model_consistency": {
+    "cells": 15727,
+    "spread_mm": 0.189,
+    "spread_p90_mm": 0.382
+  },
+  "surface_cleaning": {
+    "dropped_points": 489,
+    "components": 9,
+    "dropped_surfaces": []
+  },
+  "heightmap": {
+    "grid": [
+      505,
+      434
+    ],
+    "cell_mm": 0.15,
+    "points_in": 322548,
+    "points_rejected_cell_outlier": 9597,
+    "cells_measured": 75023,
+    "cells_despeckled": 306,
+    "islands_removed": 0,
+    "cells_filled": 12940,
+    "cells_valid": 87657,
+    "area_mm2": 1972.28
+  },
+  "ridge_method": "cog",
+  "ridge": {
+    "max_secondary_ratio": 0.6,
+    "min_prominence": 25.0,
+    "adaptive_guard": true
+  },
+  "mesh_method": "heightmap",
+  "depth_range_mm": [
+    40.0,
+    651.0
+  ],
+  "depth_window": {
+    "roi_pixels": 2939,
+    "fraction_in_range": 0.3201769309288874,
+    "columns_total": 237,
+    "columns_reachable": 232,
+    "depth_p02_mm": 91.82757130999106,
+    "depth_p98_mm": 598.8658961938764,
+    "suggested_z_range_mm": [
+      40.0,
+      651.0
+    ],
+    "mode": "auto_from_roi",
+    "requested_z_range_mm": [
+      75.0,
+      125.0
+    ]
+  },
+  "speed_mm_s_used": null,
+  "camera": {
+    "width": 1600,
+    "height": 1200,
+    "fx": 939.3265790680384,
+    "fy": 939.3265790680384,
+    "cx": 810.7791465248205,
+    "cy": 667.6291319655757,
+    "dist_coeffs": [
+      0.025343068037823373,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "pixel_size_um": 3.0
+  },
+  "laser_plane": {
+    "normal": [
+      -0.028399622544650005,
+      -0.9862825072075688,
+      -0.16260466603290769
+    ],
+    "n": [
+      -0.028399622544650005,
+      -0.9862825072075688,
+      -0.16260466603290769
+    ],
+    "d": 22.046191352107854
+  },
+  "calibration_is_nominal": false,
+  "roi_enabled": true,
+  "roi_vertices": 4,
+  "frames_total": 3740,
+  "laser_on_frames_with_points": 1861,
+  "raw_triangulated_points": 429032,
+  "fused_cloud_points": 290007,
+  "mesh_vertices": 83775,
+  "mesh_triangles": 163849,
+  "estimated_trajectory_length_mm": 255.945,
+  "quality": {
+    "measured_capture_fps": 49.331,
+    "median_frame_interval_ms": 20.271,
+    "laser_on_profile_count": 1876,
+    "laser_profile_rate_hz": 24.745,
+    "usable_profiles": 1861,
+    "kept_profiles": 1728,
+    "mean_points_per_usable_profile": 230.54,
+    "mean_clean_points_per_kept_profile": 227.35,
+    "median_profile_spacing_mm": 0.1181,
+    "mesh_extent_mm": [
+      51.45,
+      74.85,
+      21.7463
+    ],
+    "segmentation_ready_by_basic_geometry_gate": false,
+    "geometry_gate": {
+      "ok": true,
+      "reasons": [],
+      "metrics": {
+        "faces": 163849,
+        "extent_mm": [
+          51.45,
+          74.85,
+          21.746
+        ],
+        "max_extent_mm": 74.85,
+        "component_count": 2,
+        "largest_component_face_fraction": 0.9388,
+        "path_mm": null
+      }
+    },
+    "depth_window": {
+      "roi_pixels": 2939,
+      "fraction_in_range": 0.3201769309288874,
+      "columns_total": 237,
+      "columns_reachable": 232,
+      "depth_p02_mm": 91.82757130999106,
+      "depth_p98_mm": 598.8658961938764,
+      "suggested_z_range_mm": [
+        40.0,
+        651.0
+      ],
+      "mode": "auto_from_roi",
+      "requested_z_range_mm": [
+        75.0,
+        125.0
+      ]
+    },
+    "imu_rotation_span_deg": 2.87
+  },
+  "camera_actual_fourcc": "MJPG",
+  "warnings": [
+    "Laser ON/OFF flags were wrong in the recording (replaced, 2066 frames, image agreement 45%). They were corrected from the images; the capture is pairing camera frames and ESP32 strobe packets one frame apart.",
+    "Firmware recorded 10 serial warning(s); first warning: Discarded ESP32 CSV packet with 1 fields (expected 6 or 7)",
+    "Scan area (ROI) with 4 corners was applied: laser points are taken only inside it.",
+    "Model motion measured from the marker plate: 100% of frames, 25 markers per frame, 150 deg turn, tilt up to 12 deg.",
+    "CALIBRATION CHECK: laser points on the marker sheet lie +2.82 mm off the sheet plane (should be 0). Heights are biased by about that much; glue the sheet flat on a stiff card and run Calibrate with the bare sheet.",
+    "Passes aligned: overlaps disagreed by 0.24 mm, now 0.18 mm (largest shift 1.54 mm).",
+    "The camera sees the scene through a mirror; the model was un-mirrored automatically.",
+    "Auto-trim kept 0.0-75.8 s of the capture (1857 profiles); 17 profiles outside that window had no continuous laser line and were ignored.",
+    "A top view cannot see steep tooth walls. Scan again with the plate tilted on a wedge and combine the scans with Build arch in the Library (the model must not move on the plate in between)."
+  ],
+  "paths": {
+    "cloud_ply": "E:\\intraoral-scanner-hardware-integration\\intraoral-scanner\\data\\results\\scan_20261120_155428\\fused_cloud.ply",
+    "mesh_ply": "E:\\intraoral-scanner-hardware-integration\\intraoral-scanner\\data\\results\\scan_20261120_155428\\reconstructed_mesh.ply",
+    "mesh_stl": "E:\\intraoral-scanner-hardware-integration\\intraoral-scanner\\data\\results\\scan_20261120_155428\\reconstructed_mesh.stl"
+  },
+  "segmentation": null,
+  "verdict": {
+    "status": "rescan",
+    "title": "Rescan needed",
+    "reasons": [
+      "The calibration does not fit this setup: the laser places the marker sheet 2.8 mm away from where the markers say it is. Glue the sheet flat on a stiff card, run Calibrate again, then press Reprocess on this scan (no need to scan again).",
+      "Passes had to be shifted by up to 1.5 mm to line up. A sheet that is not flat (loose paper) or an imprecise calibration causes this."
+    ],
+    "metrics": {
+      "points_per_profile": 227.3,
+      "area_mm2": 1972.3,
+      "relief_mm": 19.73,
+      "motion_source": "markers"
+    }
+  }
+}

@@ -15,7 +15,12 @@ from ioscan.capture.logger import CaptureConfig, record_hardware_session
 def main() -> None:
     ap = argparse.ArgumentParser(description="Record live OV2311 camera + ESP32 BNO086 IMU session to disk.")
     ap.add_argument("--out", type=Path, required=True, help="Output session directory")
-    ap.add_argument("--cam", type=int, default=0, help="USB UVC camera index")
+    ap.add_argument("--cam", type=int, default=0, help="USB UVC camera index from the selected backend")
+    ap.add_argument(
+        "--backend", choices=("DirectShow", "Media Foundation", "Auto"), default="Auto",
+        help="Camera backend; use the same backend shown for the Arducam in the dashboard device list",
+    )
+    ap.add_argument("--camera-name", type=str, default=None, help="Optional selected camera name for session metadata")
     ap.add_argument("--port", type=str, default=None, help="ESP32 Serial port (e.g. COM3)")
     ap.add_argument("--frames", type=int, default=300, help="Number of frames to capture")
     ap.add_argument("--exposure", type=int, default=-7, help="UVC manual exposure value")
@@ -31,6 +36,8 @@ def main() -> None:
 
     cfg = CaptureConfig(
         camera_id=args.cam,
+        camera_backend=args.backend,
+        camera_name=args.camera_name,
         serial_port=args.port,
         max_frames=args.frames,
         exposure=args.exposure,

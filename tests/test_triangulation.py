@@ -62,3 +62,30 @@ def test_ridge_methods_recover_flat_plane_depth(method: str, tol_mm: float):
     assert pts_cam.shape[0] > 800
     rms_mm = float(np.sqrt(np.mean((pts_cam[:, 2] - true_z) ** 2)))
     assert rms_mm < tol_mm
+
+def test_triangulate_accepts_color_jpeg_decodes_as_bgr():
+    """JPEG decoders may return three-channel BGR for a monochrome sensor."""
+    import cv2
+
+    cam = CameraIntrinsics(width=1600, height=1200, fx=2666.7, fy=2666.7, cx=800.0, cy=600.0)
+    angle_rad = np.deg2rad(30.963756532)
+    laser = LaserPlane.from_dict({"n": [0.0, float(np.sin(angle_rad)), float(np.cos(angle_rad))], "d": -20.0})
+    on_gray, off_gray = _render_synthetic_flat_plane(cam, laser, z_depth_mm=22.0)
+    on_bgr = cv2.cvtColor(on_gray, cv2.COLOR_GRAY2BGR)
+    off_bgr = cv2.cvtColor(off_gray, cv2.COLOR_GRAY2BGR)
+
+    gray_pts, gray_uv, _ = triangulate_frame(on_gray, off_gray, cam, laser, z_range=(10, 45))
+    bgr_pts, bgr_uv, _ = triangulate_frame(on_bgr, off_bgr, cam, laser, z_range=(10, 45))
+    assert bgr_pts.shape == gray_pts.shape
+    assert np.allclose(bgr_pts, gray_pts)
+    assert np.allclose(bgr_uv, gray_uv)
+
+
+def test_laser_plane_depth_bounds_detects_depth_mismatch():
+    from ioscan.pipeline.triangulate import laser_plane_depth_bounds
+
+    cam = CameraIntrinsics(width=1600, height=1200, fx=2666.7, fy=2666.7, cx=800.0, cy=600.0)
+    laser = LaserPlane.from_baseline_and_angle(baseline_mm=25.0, angle_deg=6.0)
+    bounds = laser_plane_depth_bounds(cam, laser)
+    assert bounds is not None
+    assert bounds[0] > 45.0

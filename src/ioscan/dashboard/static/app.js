@@ -3,6 +3,8 @@
  * Talks to the existing FastAPI service only through its documented endpoints:
  *   GET  /api/status                 POST /api/capture/start    POST /api/capture/stop
  *   POST /api/camera/probe           POST /api/segmentation/start
+ *   GET  /api/sessions               POST /api/process/start    POST /api/stitch/start
+ *   GET  /api/calibration            POST /api/calibration/start  POST /api/results/open
  *   GET  /api/camera/preview.jpg     GET  /api/model/{preview|mesh|segmented|teeth|cloud}
  *   GET  /api/model/tooth/{1..14}
  *
@@ -108,12 +110,21 @@ $('theme-toggle').addEventListener('click', () => {
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tab === name)));
   document.querySelectorAll('.pane').forEach((p) => p.classList.toggle('on', p.id === `pane-${name}`));
+  if (name === 'library') refreshSessions();
 }
+/* Setup is an accordion: opening one block closes the others (also where <details name> is unsupported). */
+const ACC = [...document.querySelectorAll('#pane-setup details.acc')];
+ACC.forEach((d) => d.addEventListener('toggle', () => { if (d.open) ACC.forEach((o) => { if (o !== d) o.open = false; }); }));
+function openSetup(id) { switchTab('setup'); const d = $(id); if (d) { d.open = true; d.scrollIntoView({ block: 'nearest' }); } }
+$('btn-guide').addEventListener('click', () => $('guide-dialog').showModal());
+$('btn-guide-close').addEventListener('click', () => $('guide-dialog').close());
+$('guide-dialog').addEventListener('click', (e) => { if (e.target === $('guide-dialog')) $('guide-dialog').close(); });
 document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.tab)));
 
 /* ====================================================================== setup form */
-const FORM_IDS = ['camera-id', 'exposure', 'serial-port', 'session-name', 'frame-count', 'speed', 'jaw', 'mesh-method', 'calibration-file', 'models-dir', 'auto-segment'];
-const PERSIST = FORM_IDS.filter((i) => i !== 'session-name');
+const FORM_IDS = ['camera-device', 'exposure', 'serial-port', 'session-name', 'frame-count', 'speed', 'baseline-mm', 'laser-tilt-deg', 'fan-angle-deg', 'depth-min', 'depth-max', 'jaw', 'mesh-method', 'calibration-file', 'models-dir', 'auto-segment',
+  'recon-mode', 'translation', 'scan-length', 'secondary-ratio', 'min-prominence', 'auto-trim', 'auto-depth'];
+const PERSIST = FORM_IDS.filter((i) => !['session-name', 'camera-device'].includes(i));
 
 function loadSetup() {
   try {
@@ -130,7 +141,118 @@ function saveSetup() {
   for (const id of PERSIST) { const el = $(id); o[id] = el.type === 'checkbox' ? el.checked : el.value; }
   store('ioscan.setup', JSON.stringify(o));
 }
-FORM_IDS.forEach((id) => $(id).addEventListener('change', saveSetup));
+function updateSetupSummaries() {
+  let cam = null;
+  try { cam = JSON.parse($('camera-device').value || 'null'); } catch (e) { cam = null; }
+  setText('sum-devices', cam ? `${cam.name} · ${$('serial-port').value.trim() || '—'}` : 'No camera selected');
+  const frames = Number($('frame-count').value) || 0;
+  setText('sum-scan', `${$('jaw').value === 'upper' ? 'Upper' : 'Lower'} jaw · up to ${Math.round(frames / 50)} s`);
+}
+FORM_IDS.forEach((id) => $(id).addEventListener('change', () => { saveSetup(); updateSetupSummaries(); }));
+
+function updateWorkingDistance() {
+  const baseline = Number($('baseline-mm').value);
+  const tilt = Number($('laser-tilt-deg').value);
+  const distance = baseline > 0 && tilt > 0 && tilt < 90
+    ? baseline / Math.tan(tilt * Math.PI / 180) : NaN;
+  $('working-distance').value = Number.isFinite(distance) ? distance.toFixed(2) : '—';
+}
+$('baseline-mm').addEventListener('input', updateWorkingDistance);
+$('laser-tilt-deg').addEventListener('input', updateWorkingDistance);
+
+function hardwareGeometryPayload() {
+  return {
+    baseline_mm: Number($('baseline-mm').value),
+    laser_tilt_deg: Number($('laser-tilt-deg').value),
+    fan_half_angle_deg: Number($('fan-angle-deg').value),
+    exposure: Number($('exposure').value),
+    speed_mm_s: Number($('speed').value),
+    depth_min_mm: Number($('depth-min').value),
+    depth_max_mm: Number($('depth-max').value),
+    ...reconSettings(),
+  };
+}
+
+/* Reconstruction settings shared by capture, reprocessing and the saved hardware settings. */
+function reconSettings() {
+  return {
+    recon_mode: $('recon-mode').value,
+    translation: $('translation').value,
+    scan_length_mm: Number($('scan-length').value) || 0,
+    auto_trim: $('auto-trim').checked,
+    auto_depth: $('auto-depth').checked,
+    secondary_ratio: Number($('secondary-ratio').value),
+    min_prominence: Number($('min-prominence').value),
+  };
+}
+function validRecon(r) {
+  let ok = true;
+  if (!Number.isFinite(r.scan_length_mm) || r.scan_length_mm < 0 || r.scan_length_mm > 500) { fieldError('scan-length', 'Scan length: 0 (unknown) to 500 mm'); ok = false; } else fieldError('scan-length', null);
+  if (!Number.isFinite(r.secondary_ratio) || r.secondary_ratio < 0.1 || r.secondary_ratio > 1) { fieldError('secondary-ratio', 'Ratio: 0.1 to 1.0'); ok = false; } else fieldError('secondary-ratio', null);
+  if (!Number.isFinite(r.min_prominence) || r.min_prominence < 3 || r.min_prominence > 250) { fieldError('min-prominence', 'Brightness: 3 to 250 DN'); ok = false; } else fieldError('min-prominence', null);
+  if (r.translation === 'length' && !(r.scan_length_mm > 0)) { fieldError('scan-length', 'Enter the pass length for “Known scan length”'); ok = false; }
+  return ok;
+}
+function updateReconFields() {
+  const sweep = $('recon-mode').value === 'sweep';
+  $('translation').disabled = !sweep;
+  $('auto-trim').disabled = !sweep;
+  $('mesh-method').disabled = sweep;
+  const manualDepth = !$('auto-depth').checked;
+  $('depth-min').disabled = !manualDepth; $('depth-max').disabled = !manualDepth;
+}
+['recon-mode', 'auto-depth'].forEach((id) => $(id).addEventListener('change', updateReconFields));
+
+async function loadHardwareGeometry() {
+  try {
+    const cfg = await api('/api/hardware-geometry');
+    $('baseline-mm').value = cfg.baseline_mm;
+    $('laser-tilt-deg').value = cfg.laser_tilt_deg;
+    $('fan-angle-deg').value = cfg.fan_half_angle_deg;
+    $('exposure').value = cfg.exposure;
+    $('speed').value = cfg.speed_mm_s;
+    $('depth-min').value = cfg.depth_min_mm;
+    $('depth-max').value = cfg.depth_max_mm;
+    if (cfg.recon_mode) $('recon-mode').value = cfg.recon_mode;
+    if (cfg.translation) $('translation').value = cfg.translation;
+    if (cfg.scan_length_mm !== undefined) $('scan-length').value = cfg.scan_length_mm;
+    if (cfg.secondary_ratio !== undefined) $('secondary-ratio').value = cfg.secondary_ratio;
+    if (cfg.min_prominence !== undefined) $('min-prominence').value = cfg.min_prominence;
+    if (cfg.auto_trim !== undefined) $('auto-trim').checked = !!cfg.auto_trim;
+    if (cfg.auto_depth !== undefined) $('auto-depth').checked = !!cfg.auto_depth;
+    updateReconFields();
+    updateWorkingDistance();
+    saveSetup();
+    setText('geometry-status', `Saved hardware settings loaded · calculated working distance ${cfg.working_distance_mm.toFixed(2)} mm.`);
+  } catch (err) {
+    updateWorkingDistance();
+    setText('geometry-status', `Could not load saved hardware settings: ${err.message}`);
+  }
+}
+
+$('btn-save-geometry').addEventListener('click', async () => {
+  const btn = $('btn-save-geometry');
+  const data = hardwareGeometryPayload();
+  const valid = Number.isFinite(data.baseline_mm) && data.baseline_mm > 0.1 && data.baseline_mm <= 100
+    && Number.isFinite(data.laser_tilt_deg) && data.laser_tilt_deg > 1 && data.laser_tilt_deg < 89
+    && Number.isFinite(data.fan_half_angle_deg) && data.fan_half_angle_deg > 1 && data.fan_half_angle_deg < 89
+    && Number.isInteger(data.exposure) && data.exposure >= -13 && data.exposure <= 0
+    && Number.isFinite(data.speed_mm_s) && data.speed_mm_s > 0.05 && data.speed_mm_s <= 50
+    && Number.isFinite(data.depth_min_mm) && Number.isFinite(data.depth_max_mm)
+    && data.depth_min_mm >= 0.1 && data.depth_max_mm > data.depth_min_mm && data.depth_max_mm <= 1000;
+  if (!valid || !validRecon(data)) { toast('Check the hardware geometry and reconstruction values.', 'err'); return; }
+  btn.disabled = true;
+  try {
+    const saved = await api('/api/hardware-geometry', { method: 'POST', body: data });
+    updateWorkingDistance();
+    saveSetup();
+    setText('geometry-status', `Saved to configs/hardware_geometry.json · calculated working distance ${saved.working_distance_mm.toFixed(2)} mm.`);
+    toast('Hardware geometry and scan settings saved.');
+  } catch (err) {
+    setText('geometry-status', `Could not save settings: ${err.message}`);
+    toast(err.message, 'err');
+  } finally { btn.disabled = false; }
+});
 
 function fieldError(id, msg) {
   const input = $(id), e = $(`e-${id}`);
@@ -146,12 +268,28 @@ function readForm() {
     if (raw === '' || !Number.isInteger(n) || n < lo || n > hi) { fieldError(id, `${label}: whole number ${lo} to ${hi}`); ok = false; return null; }
     fieldError(id, null); return n;
   };
-  const camera_id = intIn('camera-id', 0, 16, 'Camera index');
+  let camera = null;
+  try { camera = JSON.parse($('camera-device').value || 'null'); } catch (e) { camera = null; }
+  if (!camera || !Number.isInteger(camera.camera_id) || !camera.camera_backend || !camera.name) {
+    toast('Refresh the camera list and select the physical Arducam UVC device by name.', 'err');
+    openSetup('acc-devices');
+    return null;
+  }
   const exposure = intIn('exposure', -13, 0, 'Exposure');
   const frames = intIn('frame-count', 20, 20000, 'Frame limit');
 
   const speed = Number($('speed').value);
   if (!Number.isFinite(speed) || speed <= 0.05 || speed > 50) { fieldError('speed', 'Speed: above 0.05 up to 50 mm/s'); ok = false; } else fieldError('speed', null);
+
+  const baseline = Number($('baseline-mm').value);
+  if (!Number.isFinite(baseline) || baseline <= 0.1 || baseline > 100) { fieldError('baseline-mm', 'Baseline must be above 0.1 and at most 100 mm'); ok = false; } else fieldError('baseline-mm', null);
+  const tilt = Number($('laser-tilt-deg').value);
+  if (!Number.isFinite(tilt) || tilt <= 1 || tilt >= 89) { fieldError('laser-tilt-deg', 'Angle must be between 1° and 89°'); ok = false; } else fieldError('laser-tilt-deg', null);
+  const fan = Number($('fan-angle-deg').value);
+  if (!Number.isFinite(fan) || fan <= 1 || fan >= 89) { fieldError('fan-angle-deg', 'Fan half-angle must be between 1° and 89°'); ok = false; } else fieldError('fan-angle-deg', null);
+  const depthMin = Number($('depth-min').value), depthMax = Number($('depth-max').value);
+  if (!Number.isFinite(depthMin) || depthMin < 0.1 || depthMin >= depthMax) { fieldError('depth-min', 'Minimum depth must be positive and below maximum depth'); ok = false; } else fieldError('depth-min', null);
+  if (!Number.isFinite(depthMax) || depthMax <= depthMin || depthMax > 1000) { fieldError('depth-max', 'Maximum depth must exceed minimum depth and be at most 1000 mm'); ok = false; } else fieldError('depth-max', null);
 
   const serial_port = $('serial-port').value.trim();
   if (!serial_port || serial_port.length > 32) { fieldError('serial-port', 'Enter the ESP32 serial port, e.g. COM3'); ok = false; } else fieldError('serial-port', null);
@@ -161,9 +299,15 @@ function readForm() {
     fieldError('session-name', 'Letters, numbers, “_” and “-” only (max 64)'); ok = false;
   } else fieldError('session-name', null);
 
+  const recon = reconSettings();
+  if (!validRecon(recon)) ok = false;
   if (!ok) { switchTab('setup'); return null; }
   const payload = {
-    camera_id, serial_port, frames, exposure, speed_mm_s: speed,
+    ...recon,
+    camera_id: camera.camera_id, camera_backend: camera.camera_backend, camera_name: camera.name,
+    serial_port, frames, exposure, speed_mm_s: speed,
+    baseline_mm: baseline, laser_tilt_deg: tilt, fan_half_angle_deg: fan,
+    depth_min_mm: depthMin, depth_max_mm: depthMax,
     jaw: $('jaw').value, mesh_method: $('mesh-method').value,
     auto_segment: $('auto-segment').checked,
     models_dir: $('models-dir').value.trim() || null,
@@ -173,8 +317,13 @@ function readForm() {
   return payload;
 }
 
+let formLocked = null;
 function lockForm(locked) {
+  if (formLocked === locked) return;   // render() runs every poll; do not undo field-level disabling
+  formLocked = locked;
   document.querySelectorAll('#pane-setup input, #pane-setup select, #pane-setup button').forEach((el) => { el.disabled = locked; });
+  if (!locked) updateReconFields();
+  renderLibrary();
 }
 
 /* ====================================================================== viewer (three.js) */
@@ -491,6 +640,8 @@ function setCamImage(blob) {
   const img = $('cam-img');
   img.onload = () => { if (S.camUrl && S.camUrl !== url) URL.revokeObjectURL(S.camUrl); S.camUrl = url; };
   img.src = url;
+  const roiImg = $('roi-preview-img');
+  if (roiImg) roiImg.src = url;
   if (!S.camShown) { S.camShown = true; img.hidden = false; $('cam-empty').hidden = true; }
 }
 
@@ -504,12 +655,170 @@ async function fetchPreviewOnce() {
 async function previewLoop() {
   if (S.previewRunning) return;
   S.previewRunning = true;
-  while (S.wantPreview) {
+  // Keep polling whenever the server has a live camera (also after a scan, while it is processed).
+  while (S.wantPreview || (S.snap ? S.snap.camera_live : S.cam.state === 'ready')) {
     await fetchPreviewOnce();          // strictly sequential: never queues requests behind a slow frame
     await sleep(90);
   }
   await fetchPreviewOnce();            // keep the final frame on screen
   S.previewRunning = false;
+}
+
+/* ====================================================================== operator-drawn camera ROI */
+const ROI = { points: [], enabled: false, dragIndex: null, loaded: false, dirty: false };
+
+function roiCoords() {
+  return ROI.points.map(([x, y]) => `${(x * 1600).toFixed(1)},${(y * 1200).toFixed(1)}`).join(' ');
+}
+
+function renderROI() {
+  const points = ROI.points;
+  const polygon = $('roi-shape');
+  const outside = $('roi-outside');
+  const handles = $('roi-handles');
+  const valid = points.length >= 3;
+  polygon.setAttribute('points', roiCoords());
+  polygon.style.display = points.length >= 2 ? '' : 'none';
+  if (ROI.enabled && valid) {
+    const inner = points.map(([x, y]) => `${(x * 1600).toFixed(1)} ${(y * 1200).toFixed(1)}`).join(' L');
+    outside.setAttribute('d', `M0 0H1600V1200H0Z M${inner}Z`);
+    outside.style.display = '';
+  } else {
+    outside.setAttribute('d', '');
+    outside.style.display = 'none';
+  }
+  handles.replaceChildren();
+  points.forEach(([x, y], index) => {
+    const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    c.setAttribute('class', 'roi-vertex'); c.setAttribute('data-index', String(index));
+    c.setAttribute('cx', String(x * 1600)); c.setAttribute('cy', String(y * 1200)); c.setAttribute('r', '20');
+    c.setAttribute('aria-label', `ROI vertex ${index + 1}`);
+    handles.appendChild(c);
+  });
+  setText('roi-vertex-count', `${points.length} ${points.length === 1 ? 'vertex' : 'vertices'}`);
+  $('roi-enabled').checked = ROI.enabled;
+  $('btn-roi-undo').disabled = points.length === 0;
+  $('btn-roi-save').disabled = ROI.enabled && points.length < 3;
+  $('roi-empty-note').textContent = points.length
+    ? 'Click to add another corner · drag a handle to adjust · Save ROI when finished.'
+    : 'Check the camera, then click around the inside edge of the opening.';
+  if (ROI.dirty) setText('roi-status', 'Unsaved ROI edits · save to apply this polygon to future scans.');
+  else if (!ROI.loaded) setText('roi-status', 'Draw an ROI, then save it.');
+}
+
+async function loadROI() {
+  try {
+    const data = await api('/api/roi');
+    ROI.points = Array.isArray(data.points) ? data.points.map((p) => [Number(p[0]), Number(p[1])]) : [];
+    ROI.enabled = !!data.enabled;
+    ROI.loaded = true; ROI.dirty = false;
+    renderROI();
+    setText('roi-status', ROI.enabled
+      ? `Saved and active · ${ROI.points.length} vertices · applied before laser-line extraction.`
+      : ROI.points.length ? `Saved but inactive · ${ROI.points.length} vertices · full frame will be processed.`
+        : 'No ROI saved · full camera frame will be processed.');
+  } catch (err) {
+    setText('roi-status', `Could not load saved ROI: ${err.message}`);
+    toast(`Could not load camera ROI: ${err.message}`, 'err');
+  }
+}
+
+function roiPointerPosition(event) {
+  const rect = $('roi-overlay').getBoundingClientRect();
+  return [
+    Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+    Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
+  ];
+}
+
+$('roi-overlay').addEventListener('pointerdown', (event) => {
+  if (event.button !== 0) return;
+  const handle = event.target.closest && event.target.closest('circle[data-index]');
+  if (handle) {
+    ROI.dragIndex = Number(handle.dataset.index);
+    $('roi-overlay').setPointerCapture(event.pointerId);
+    event.preventDefault();
+    return;
+  }
+  ROI.points.push(roiPointerPosition(event));
+  ROI.loaded = true; ROI.dirty = true;
+  renderROI();
+});
+$('roi-overlay').addEventListener('pointermove', (event) => {
+  if (ROI.dragIndex === null) return;
+  ROI.points[ROI.dragIndex] = roiPointerPosition(event);
+  ROI.dirty = true; renderROI();
+});
+function finishROIDrag() { ROI.dragIndex = null; }
+$('roi-overlay').addEventListener('pointerup', finishROIDrag);
+$('roi-overlay').addEventListener('pointercancel', finishROIDrag);
+$('btn-roi-undo').addEventListener('click', () => { ROI.points.pop(); ROI.dirty = true; renderROI(); });
+$('btn-roi-clear').addEventListener('click', () => {
+  ROI.points = []; ROI.enabled = false; ROI.loaded = true; ROI.dirty = true; renderROI();
+  setText('roi-status', 'ROI cleared in the editor. Save ROI to disable the mask for future scans.');
+});
+$('roi-enabled').addEventListener('change', (event) => { ROI.enabled = !!event.target.checked; ROI.loaded = true; ROI.dirty = true; renderROI(); });
+$('btn-roi-save').addEventListener('click', async () => {
+  const btn = $('btn-roi-save');
+  if (ROI.enabled && ROI.points.length < 3) {
+    toast('Add at least three corners before enabling the ROI.', 'err'); return;
+  }
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const saved = await api('/api/roi', { method: 'POST', body: {
+      version: 1, width: 1600, height: 1200, enabled: ROI.enabled, points: ROI.points,
+    } });
+    ROI.points = saved.points; ROI.enabled = !!saved.enabled; ROI.loaded = true; ROI.dirty = false; renderROI();
+    setText('roi-status', ROI.enabled
+      ? `Saved and active · ${ROI.points.length} vertices. New scans will apply this mask before triangulation.`
+      : ROI.points.length ? `Saved but inactive · ${ROI.points.length} vertices. Full-frame processing remains enabled.`
+        : 'Saved · ROI disabled; full camera frame will be processed.');
+    toast(ROI.enabled ? 'Camera ROI saved and enabled for future scans.' : 'Camera ROI saved; mask is disabled.');
+  } catch (err) {
+    toast(`Could not save camera ROI: ${err.message}`, 'err');
+  } finally {
+    btn.textContent = 'Save ROI';
+    btn.disabled = false;
+  }
+});
+
+async function refreshCameraDevices() {
+  const btn = $('btn-refresh-cameras');
+  if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
+  try {
+    const result = await api('/api/camera/devices');
+    const select = $('camera-device');
+    const previous = select.value;
+    select.replaceChildren();
+    for (const device of (result.devices || [])) {
+      const option = document.createElement('option');
+      option.value = JSON.stringify({ camera_id: device.camera_id, camera_backend: device.backend, name: device.name });
+      option.textContent = device.label || `${device.name} — ${device.backend} (index ${device.camera_id})`;
+      select.appendChild(option);
+    }
+    if (!select.options.length) {
+      const option = document.createElement('option');
+      option.value = ''; option.textContent = 'No cameras enumerated';
+      select.appendChild(option);
+      toast('No camera devices were enumerated. Check the USB connection and camera driver.', 'err');
+    } else {
+      const match = [...select.options].find((o) => o.value === previous);
+      if (match) select.value = previous;
+      else {
+        const arducam = [...select.options].find((o) => /arducam|ov2311/i.test(o.textContent));
+        select.value = (arducam || select.options[0]).value;
+      }
+      toast(`Found ${select.options.length} camera device/backend entries. Select the physical Arducam UVC device.`);
+    }
+  } catch (err) {
+    $('camera-device').replaceChildren();
+    const option = document.createElement('option');
+    option.value = ''; option.textContent = 'Camera enumeration unavailable';
+    $('camera-device').appendChild(option);
+    toast(err.message, 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Refresh list'; }
+  }
 }
 
 async function probeCamera() {
@@ -518,15 +827,25 @@ async function probeCamera() {
   const btns = [$('btn-probe'), $('btn-probe-empty')];
   btns.forEach((b) => { b.disabled = true; b.textContent = 'Checking…'; });
   try {
-    const id = Number($('camera-id').value || 0);
-    const d = await api('/api/camera/probe', { method: 'POST', body: { camera_id: id } });
-    S.cam = { state: 'ready', w: d.width, h: d.height };
+    let camera = null;
+    try { camera = JSON.parse($('camera-device').value || 'null'); } catch (e) { camera = null; }
+    if (!camera) throw new Error('Refresh the camera list and select the physical Arducam UVC device by name.');
+    const d = await api('/api/camera/probe', { method: 'POST', body: {
+      camera_id: camera.camera_id, camera_backend: camera.camera_backend, camera_name: camera.name,
+    } });
+    S.cam = { state: 'ready', w: d.width, h: d.height, format: d.pixel_format, fps: d.measured_fps };
     await fetchPreviewOnce();
+    previewLoop();
     setText('cam-res', `${d.width} × ${d.height}`);
+    const measured = Number(d.measured_fps ?? d.fps ?? 0);
+    const mode = `${d.pixel_format || 'unknown format'} · ${measured.toFixed(1)} FPS`;
+    const light = ` mean ${d.brightness_mean}, p95 ${d.brightness_p95}/255`;
     if (d.width !== 1600 || d.height !== 1200) {
-      toast(`Camera returned ${d.width} × ${d.height}. The pipeline and calibration expect 1600 × 1200; check the UVC mode.`, 'err');
+      toast(`${d.camera_name} returned ${d.width} × ${d.height}; the pipeline expects 1600 × 1200.`, 'err');
+    } else if (d.pixel_format !== 'MJPG' || measured < 42.5) {
+      toast(`${d.camera_name} is not ready for scanning: ${mode}. Required: MJPG and at least 42.5 measured FPS. Try the other camera backend and close other camera applications.${light}`, 'err');
     } else {
-      toast(`Camera ${d.camera_id} responds at ${d.width} × ${d.height}.`);
+      toast(`${d.camera_name} is ready through ${d.camera_backend}: ${d.width} × ${d.height}, ${mode}.${light}`);
     }
   } catch (err) {
     S.cam = { state: 'error', w: 0, h: 0 };
@@ -537,6 +856,7 @@ async function probeCamera() {
     if (S.snap) render(S.snap);
   }
 }
+$('btn-refresh-cameras').addEventListener('click', refreshCameraDevices);
 $('btn-probe').addEventListener('click', probeCamera);
 $('btn-probe-empty').addEventListener('click', probeCamera);
 
@@ -580,6 +900,190 @@ async function runSegmentation() {
   } catch (err) { showClientAlert('Could not start segmentation', err.message); toast(err.message, 'err'); }
   await pollNow();
 }
+/* ---- library: saved scans (open, reprocess, build an arch, calibrate) ----------------- */
+const LIB = { order: [], sessions: [] };
+const VERDICT_LABEL = { good: 'Good', check: 'Usable', rescan: 'Rescan' };
+const MOTION_LABEL = { markers: 'marker plate', planar: 'image tracking', flow: 'image shift', length: 'known length', speed: 'assumed speed' };
+function fmtWhen(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const today = new Date().toDateString() === d.toDateString();
+  const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return today ? `today ${hm}` : `${d.toLocaleDateString([], { day: '2-digit', month: 'short' })} ${hm}`;
+}
+function renderLibrary() {
+  const box = $('lib-list');
+  if (!box) return;
+  const busy = ['capturing', 'processing'].includes(S.snap && S.snap.phase);
+  LIB.order = LIB.order.filter((n) => LIB.sessions.some((x) => x.name === n));
+  box.innerHTML = LIB.sessions.length ? LIB.sessions.map((x) => {
+    const k = LIB.order.indexOf(x.name);
+    const bits = [fmtWhen(x.modified)];
+    if (x.kind === 'calibration') bits.push('calibration recording');
+    else if (x.kind === 'arch') bits.push('built arch');
+    else {
+      if (x.frames != null) bits.push(`${Math.round(x.frames / 50)} s`);
+      bits.push(x.has_mesh ? (MOTION_LABEL[x.motion] || 'processed') : 'not processed');
+    }
+    const pill = x.kind === 'calibration' ? '<span class="pill">Calib</span>'
+      : x.verdict ? `<span class="pill ${esc(x.verdict)}">${VERDICT_LABEL[x.verdict] || esc(x.verdict)}</span>` : '<span></span>';
+    return `<div class="lib-item${k >= 0 ? ' on' : ''}" data-lib="${esc(x.name)}"><span class="ord">${k >= 0 ? k + 1 : ''}</span>`
+      + `<span><div class="nm">${esc(x.name)}</div><div class="meta">${esc(bits.filter(Boolean).join(' · '))}</div></span>${pill}</div>`;
+  }).join('') : '<div class="empty" style="border:0">No saved scans yet.</div>';
+  const sel = LIB.order.map((n) => LIB.sessions.find((x) => x.name === n)).filter(Boolean);
+  setText('lib-count', `${sel.length} selected`);
+  const one = sel.length === 1 ? sel[0] : null;
+  const calib = one && one.kind === 'calibration';
+  const scans = sel.filter((x) => x.kind !== 'calibration');
+  const allMarkers = scans.length > 0 && scans.every((x) => x.motion === 'markers');
+  $('btn-lib-open').disabled = busy || !one || !one.has_mesh;
+  const rp = $('btn-lib-reprocess');
+  rp.textContent = calib ? 'Calibrate' : 'Reprocess';
+  rp.disabled = busy || !one || one.kind === 'arch';
+  const canMerge = scans.length === sel.length && scans.every((x) => x.has_mesh && x.kind === 'scan')
+    && (scans.length >= 2 || (scans.length === 1 && allMarkers));
+  $('btn-lib-merge').disabled = busy || !canMerge;
+  let hint = 'Select one scan to open or reprocess it. Select several to build one arch from them.';
+  if (calib) hint = 'Calibrate recomputes the calibration from this recording of the bare marker sheet.';
+  else if (one && one.kind === 'arch') hint = 'A built arch can be opened and segmented from the Results tab.';
+  else if (scans.length === 1 && allMarkers) hint = 'Build arch trims this marker-plate scan to the teeth, orients it and can segment it.';
+  else if (scans.length >= 2 && allMarkers) hint = 'These scans share the marker plate: they are combined directly, without stitching.';
+  else if (scans.length >= 2 && scans.some((x) => x.motion === 'markers')) hint = 'Marker-plate scans cannot be combined with scans made without the plate.';
+  else if (scans.length >= 2) hint = 'Scans without the marker plate are stitched in the order selected; each must overlap the previous one.';
+  setText('lib-hint', hint);
+}
+$('lib-list').addEventListener('click', (e) => {
+  const it = e.target.closest('[data-lib]');
+  if (!it) return;
+  const n = it.dataset.lib, k = LIB.order.indexOf(n);
+  if (k >= 0) LIB.order.splice(k, 1); else LIB.order.push(n);
+  renderLibrary();
+});
+function freshView() {
+  V.reset?.();
+  Object.assign(S, { origin: null, userMoved: false, needFit: true, loadedKey: null, failKey: null, view: 'auto', lastGood: null });
+}
+async function refreshSessions() {
+  try {
+    const { sessions } = await api('/api/sessions');
+    LIB.sessions = sessions;
+  } catch (err) { /* keep the previous list; the status bar reports connection problems */ }
+  renderLibrary();
+}
+async function openResult() {
+  const name = LIB.order[0];
+  if (!name) return;
+  S.clientAlert = null;
+  try {
+    await api('/api/results/open', { method: 'POST', body: { name } });
+    freshView();
+    switchTab('scan');
+  } catch (err) { showClientAlert('Could not open the scan', err.message); toast(err.message, 'err'); }
+  await pollNow();
+}
+async function reprocessSession() {
+  const name = LIB.order[0];
+  const item = LIB.sessions.find((x) => x.name === name);
+  if (!item) { toast('Select a saved scan first.', 'err'); return; }
+  if (item.kind === 'calibration') return calibrateFrom(name);
+  const recon = reconSettings();
+  if (!validRecon(recon)) { toast('Check the reconstruction settings in Setup → Advanced.', 'err'); return; }
+  S.clientAlert = null;
+  try {
+    await api('/api/process/start', { method: 'POST', body: {
+      ...recon, session_name: name, depth_min_mm: Number($('depth-min').value), depth_max_mm: Number($('depth-max').value),
+      speed_mm_s: Number($('speed').value), jaw: $('jaw').value, mesh_method: $('mesh-method').value,
+      auto_segment: false, models_dir: $('models-dir').value.trim() || null,
+      use_calibration: $('use-calibration').checked,
+    } });
+    freshView();
+    switchTab('scan');
+    toast(`Reprocessing ${name}…`);
+  } catch (err) { showClientAlert('Could not reprocess the scan', err.message); toast(err.message, 'err'); }
+  await pollNow();
+}
+async function buildArch() {
+  if (!LIB.order.length) return;
+  const name = $('stitch-name').value.trim();
+  if (name && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)) { toast('Arch name: letters, numbers, “_” and “-” only.', 'err'); return; }
+  S.clientAlert = null;
+  try {
+    const body = { passes: LIB.order.slice(), keep_base: $('stitch-keep-base').checked,
+      auto_segment: $('stitch-segment').checked, jaw: $('jaw').value, models_dir: $('models-dir').value.trim() || null };
+    if (name) body.name = name;
+    const r = await api('/api/stitch/start', { method: 'POST', body });
+    freshView();
+    switchTab('scan');
+    toast(`Building ${r.name} from ${LIB.order.length} scan${LIB.order.length === 1 ? '' : 's'}…`);
+  } catch (err) { showClientAlert('Could not build the arch', err.message); toast(err.message, 'err'); }
+  await pollNow();
+}
+$('btn-lib-refresh').addEventListener('click', refreshSessions);
+$('btn-lib-open').addEventListener('click', openResult);
+$('btn-lib-reprocess').addEventListener('click', reprocessSession);
+$('btn-lib-merge').addEventListener('click', buildArch);
+
+/* ---- calibration ---------------------------------------------------------------------- */
+const CAL = { status: null };
+function barLength() {
+  const v = Number($('bar-length').value);
+  return Number.isFinite(v) && v >= 90 && v <= 110 ? v : null;
+}
+function renderCalibration() {
+  const c = CAL.status;
+  if (!c) return;
+  const ok = !!c.calibrated;
+  const q = ok ? (c.quality === 'good' ? 'ok' : 'warn') : '';
+  $('cal-pill').className = `pill ${q}`;
+  setText('cal-pill', ok ? (c.quality === 'good' ? 'Calibrated' : 'Check') : 'Nominal');
+  setText('cal-title', ok ? 'Calibrated' : 'Not calibrated');
+  setText('sum-calibration', ok ? `Calibrated ${c.created ? fmtWhen(c.created) : ''}`.trim() : 'Not calibrated');
+  $('setup-dot').hidden = ok;
+  if (c.error) { setText('cal-detail', c.error); return; }
+  if (ok) {
+    const parts = [`Focal length ${Math.round(c.focal_px)} px`];
+    if (c.focal_change_percent != null) parts[0] += ` (${c.focal_change_percent > 0 ? '+' : ''}${Number(c.focal_change_percent).toFixed(1)}% vs nominal)`;
+    if (c.camera_rms_px != null) parts.push(`marker fit ${Number(c.camera_rms_px).toFixed(2)} px`);
+    if (c.sheet_residual_mm != null) parts.push(`sheet residual ${Number(c.sheet_residual_mm).toFixed(2)} mm`);
+    if (c.mirrored_optics) parts.push('mirror in the optical path detected');
+    setText('cal-detail', `${parts.join(' · ')}.${(c.notes || []).length ? ' ' + c.notes.join(' ') : ''} Recalibrate only if the camera, lens or laser is moved.`);
+    if (c.board && c.board.scale && document.activeElement !== $('bar-length')) $('bar-length').value = (c.board.scale * 100).toFixed(1).replace(/\.0$/, '');
+  } else {
+    setText('cal-detail', 'The scanner is using nominal lens and laser values. Calibrate once with the bare marker sheet; redo it only if the camera, lens or laser is moved.');
+  }
+}
+async function refreshCalibration() {
+  try { CAL.status = await api('/api/calibration'); renderCalibration(); } catch (e) { /* shown on next refresh */ }
+}
+async function recordCalibration() {
+  const bar = barLength();
+  if (bar === null) { toast('Enter the measured length of the printed 100 mm bar (90 to 110 mm).', 'err'); return; }
+  const payload = readForm();
+  if (!payload) return;
+  delete payload.session_name;
+  Object.assign(payload, { purpose: 'calibration', bar_length_mm: bar, frames: 1500, auto_segment: false, calibration_file: null });
+  S.clientAlert = null;
+  try {
+    await api('/api/capture/start', { method: 'POST', body: payload });
+    freshView();
+    switchTab('scan');
+    toast('Recording calibration: slide, lift and tilt the bare marker sheet for 30 seconds.', 'info', 12000);
+  } catch (err) { showClientAlert('Could not start the calibration recording', err.message); toast(err.message, 'err'); }
+  await pollNow();
+}
+async function calibrateFrom(name) {
+  const bar = barLength();
+  if (bar === null) { toast('Enter the measured bar length in Setup → Calibration first.', 'err'); openSetup('acc-calibration'); return; }
+  S.clientAlert = null;
+  try {
+    await api('/api/calibration/start', { method: 'POST', body: { session_name: name, bar_length_mm: bar } });
+    switchTab('scan');
+    toast(`Calibrating from ${name}…`);
+  } catch (err) { showClientAlert('Could not start the calibration', err.message); toast(err.message, 'err'); }
+  await pollNow();
+}
+$('btn-cal-record').addEventListener('click', recordCalibration);
+
 $('btn-start').addEventListener('click', startScan);
 $('btn-stop').addEventListener('click', stopScan);
 $('btn-segment').addEventListener('click', runSegmentation);
@@ -602,16 +1106,17 @@ window.addEventListener('beforeunload', (e) => {
 
 /* ====================================================================== status → UI */
 const STAGE_TITLES = {
-  ready: 'System ready', capturing: 'Recording scan', captured: 'Capture saved', reconstructing: 'Triangulating and fusing profiles',
-  meshing: 'Building surface mesh', mesh_ready: 'Surface mesh ready', reconstructed: 'Reconstruction complete',
-  segmenting: 'Segmenting teeth', complete: 'Processing complete', segmentation_error: 'Segmentation needs review', error: 'Stopped with an error',
+  ready: 'System ready', capturing: 'Recording', captured: 'Recording saved', reconstructing: 'Building the 3D surface',
+  meshing: 'Building the surface mesh', mesh_ready: 'Surface mesh ready', reconstructed: 'Reconstruction complete',
+  segmenting: 'Segmenting teeth', stitching: 'Building the arch', quality_error: 'Needs review', complete: 'Processing complete', segmentation_error: 'Segmentation needs review', error: 'Stopped with an error',
+  calibrating: 'Calibrating', calibrated: 'Calibration saved',
 };
 
 function stepStates(snap) {
   const { phase, stage } = snap;
   const out = snap.outputs || {};
   const hasMesh = !!out.mesh;
-  const recStages = ['reconstructing', 'meshing', 'mesh_ready'];
+  const recStages = ['reconstructing', 'meshing', 'mesh_ready', 'calibrating', 'stitching'];
   const failedAt = S.lastGood;
   const errored = phase === 'error';
 
@@ -623,7 +1128,7 @@ function stepStates(snap) {
 
   let rec;
   if (recStages.includes(stage)) rec = ['active', 'Running'];
-  else if (['reconstructed', 'segmenting', 'complete', 'segmentation_error'].includes(stage) || hasMesh) rec = ['done', 'Done'];
+  else if (['reconstructed', 'segmenting', 'complete', 'segmentation_error', 'calibrated'].includes(stage) || hasMesh) rec = ['done', 'Done'];
   else if (errored && (failedAt === 'captured' || recStages.includes(failedAt))) rec = ['error', 'Failed'];
   else rec = ['', 'Waiting'];
 
@@ -644,14 +1149,6 @@ function renderWorkflow(snap) {
     el.className = `wf-step ${st[0]}`;
     setText(`wf-${id}-s`, st[1]);
   }
-  const rows = [['st-capture', s.cap, { '': 'READY', active: 'LIVE', done: 'DONE', error: 'FAILED' }],
-                ['st-reconstruct', s.rec, { '': 'WAITING', active: 'RUNNING', done: 'DONE', error: 'FAILED' }],
-                ['st-segment', s.seg, { '': 'WAITING', active: 'RUNNING', done: 'DONE', error: 'REVIEW', skipped: 'SKIPPED' }]];
-  for (const [id, st, labels] of rows) {
-    const li = $(id);
-    li.className = st[0];
-    li.querySelector('.st').textContent = labels[st[0]] || '';
-  }
 }
 
 function renderChips(snap) {
@@ -668,7 +1165,7 @@ function renderChips(snap) {
   if (streaming) { cls = 'live'; txt = 'Camera · streaming'; }
   else if (phase === 'capturing') { cls = 'warn'; txt = 'Camera · opening'; }
   else if (failedCap && /camera|frame/i.test(err)) { cls = 'err'; txt = 'Camera · fault'; }
-  else if (S.cam.state === 'ready') { cls = 'ok'; txt = `Camera · ${S.cam.w}×${S.cam.h}`; }
+  else if (S.cam.state === 'ready') { cls = 'ok'; txt = S.cam.w ? `Camera · ${S.cam.w}×${S.cam.h}` : 'Camera · live'; }
   else if (S.cam.state === 'error') { cls = 'err'; txt = 'Camera · no signal'; }
   $('dot-camera').className = `dot ${cls}`; setText('txt-camera', txt);
 
@@ -699,35 +1196,38 @@ function updateFps(snap) {
 function renderReadouts(snap) {
   const capturing = snap.phase === 'capturing';
   setText('ro-frames', snap.frame ? `${fmtInt(snap.frame)} / ${fmtInt(snap.frames_total)}` : '—');
-  setText('ro-frames-sub', capturing ? `Recording · ${S.capStart !== null ? fmtClock(performance.now() - S.capStart) : '--:--'}` : snap.frame ? 'Capture saved' : 'Not recording');
+  setText('ro-frames-sub', capturing ? (S.capStart !== null ? fmtClock(performance.now() - S.capStart) : '--:--') : snap.frame ? 'saved' : 'Not recording');
 
   const fps = capturing ? S.fps : S.capAvg;
   const low = capturing && fps != null && snap.frame > 60 && fps < TARGET_FPS * 0.9;
   $('ro-fps').firstChild.nodeValue = fps != null ? fps.toFixed(1) : '—';
   const sub = $('ro-fps-sub');
   sub.className = `sub ${low ? 'warn' : ''}`;
-  sub.textContent = low ? `Below ${TARGET_FPS} fps target`
-    : capturing ? (fps == null ? 'Measuring…' : `Target ${TARGET_FPS} fps`)
-    : S.capAvg != null ? 'Session average' : `Target ${TARGET_FPS} fps`;
+  sub.textContent = low ? `below ${TARGET_FPS} target`
+    : capturing ? (fps == null ? 'measuring…' : `target ${TARGET_FPS}`)
+    : S.capAvg != null ? 'average' : `target ${TARGET_FPS}`;
 
   const live = snap.model_asset === 'preview' && snap.phase !== 'complete';
   setText('ro-points-label', live ? 'Live points' : 'Fused points');
   setText('ro-points', snap.point_count ? fmtInt(snap.point_count) : '—');
-  setText('ro-points-sub', live ? 'Raw triangulated' : 'After voxel fusion');
+  setText('ro-points-sub', snap.point_count ? (live ? 'live preview' : 'fused') : 'No points yet');
   setText('ro-faces', snap.mesh_faces ? fmtInt(snap.mesh_faces) : '—');
   setText('ro-faces-sub', snap.mesh_vertices ? `${fmtInt(snap.mesh_vertices)} vertices` : 'No surface yet');
   $('ro-path').firstChild.nodeValue = snap.trajectory_mm ? Number(snap.trajectory_mm).toFixed(1) : '—';
-  setText('ro-path-sub', snap.trajectory_mm ? 'Estimated at assumed speed' : 'Estimated trajectory');
+  const TR = { markers: 'marker plate', planar: 'image tracking', flow: 'image shift', length: 'known length', speed: 'assumed speed' };
+  setText('ro-path-sub', snap.trajectory_mm ? (TR[snap.translation_source] || 'assumed speed') : 'No scan yet');
 }
 
 function renderCameraMeta(snap) {
   const capturing = snap.phase === 'capturing';
   $('cam-hud').hidden = !(S.camShown || snap.frame > 0);
   $('hud-rec').firstElementChild.className = `dot ${capturing ? 'rec' : ''}`;
-  setText('hud-rec-t', capturing ? 'REC' : snap.frame ? 'Captured' : 'Standby');
-  setText('hud-laser', `Last frame · laser ${snap.frame ? (snap.laser_on ? 'ON' : 'OFF') : '—'}`);
+  setText('hud-rec-t', capturing ? 'REC' : snap.camera_live ? 'Live' : snap.frame ? 'Captured' : 'Standby');
+  setText('hud-laser', snap.camera_live && !capturing ? 'Live preview · laser off'
+    : `Last frame · laser ${snap.frame ? (snap.laser_on ? 'ON' : 'OFF') : '—'}`);
   setText('cam-meta-r', `Frame ${snap.frame ? fmtInt(snap.frame) : '—'} / ${snap.frames_total ? fmtInt(snap.frames_total) : '—'}`);
   setText('cam-meta-l', capturing ? 'Streaming from scanner'
+    : snap.camera_live ? 'Live camera preview'
     : snap.frame ? 'Last captured frame'
     : S.cam.state === 'ready' ? 'Camera test passed'
     : S.cam.state === 'error' ? 'Camera test failed' : 'Camera not tested');
@@ -741,9 +1241,9 @@ function renderProgress(snap) {
   setText('prog-pct', idle ? '0%' : `${Math.round(p)}%`);
   $('progress-bar').style.width = idle ? '0%' : `${p}%`;
   const total = snap.frames_total || 0;
-  let count = '—';
-  if (stage === 'capturing' && total) count = `${fmtInt(snap.frame)} / ${fmtInt(total)} frames`;
-  else if ((stage === 'reconstructing' || stage === 'meshing') && total) count = `${fmtInt(snap.processed_frames || 0)} / ${fmtInt(total)} frames`;
+  let count = '';
+  if (stage === 'capturing' && total) count = `${fmtInt(snap.frame)} / ${fmtInt(total)} · `;
+  else if ((stage === 'reconstructing' || stage === 'meshing') && total) count = `${fmtInt(snap.processed_frames || 0)} / ${fmtInt(total)} · `;
   setText('prog-count', count);
   const msg = snap.error ? `${snap.message} ${snap.error}` : (snap.message || '');
   setText('status-msg', msg);
@@ -752,8 +1252,8 @@ function renderProgress(snap) {
 
 function hintFor(error, where) {
   const e = String(error || '');
-  if (/queue overflow/i.test(e)) return 'The host did not keep up with the camera strobe rate. Close other heavy applications and retry; if it persists the capture loop needs more headroom.';
-  if (/sequence gap/i.test(e)) return 'Serial packets were lost between the ESP32 and the PC. Check the USB cable/port and that nothing else is reading the port.';
+  if (/queue overflow/i.test(e)) return 'The PC capture loop fell behind the ESP32 strobe stream. IOSCAN now stores every JPEG directly and samples only selected OFF/ON pairs for live preview; verify the measured capture rate and host queue depth before retrying.';
+  if (/sequence gap/i.test(e)) return 'One or more physical camera STROBE events did not produce a packet. Check ESP32 ring-overflow / stale-IMU warnings, USB serial integrity, and ensure no other app is reading the COM port.';
   if (/No synchronized ESP32|strobe packet/i.test(e)) return 'No camera-strobe packets arrived. Check the STROBE wire to GPIO34, the BNO086 connection, and that the firmware is running.';
   if (/could not open usb camera|camera stopped/i.test(e)) return 'The camera could not be opened or stopped delivering frames. Close other apps using it and check the camera index.';
   if (/No laser points/i.test(e)) return 'No laser line was found. Check the calibration file, laser alignment, and that saved frames alternate laser OFF / ON in step with the firmware (a one-frame strobe offset produces exactly this error).';
@@ -828,8 +1328,8 @@ function renderViewerEmpty(snap) {
   const capturing = snap.phase === 'capturing';
   setText('viewer-empty-title', capturing ? 'Waiting for the first laser profiles' : 'No geometry');
   setText('viewer-empty-sub', capturing
-    ? 'The fused point cloud appears after laser-ON frames pair with an ambient frame and an IMU orientation.'
-    : 'The fused point cloud appears here while the scan is recording.');
+    ? 'Points appear as soon as the laser line is found on the model.'
+    : 'The scan appears here while it is recorded and processed.');
 }
 
 function renderResults(snap) {
@@ -848,7 +1348,7 @@ function renderResults(snap) {
       ${viewable ? `<button class="link-btn" data-view="${k}">View</button>` : '<span></span>'}
       <a class="link-btn" href="/api/model/${k}" download="${FILES[k].file}" title="Download PLY"><svg class="i"><use href="#i-down"/></svg>PLY</a>
     </div>`; }).join('')}</div>`
-    : '<div class="empty">Reconstruction outputs appear here once processing finishes.</div>';
+    : '<div class="empty">Outputs appear here once processing finishes.</div>';
 
   $('sec-seg').hidden = !seg;
   if (seg) {
@@ -879,6 +1379,67 @@ function renderResults(snap) {
   }
 }
 
+const READY_ORDER = ['markers', 'line', 'light', 'calibration'];
+const READY_PLACEHOLDER = { markers: 'Marker plate', line: 'Laser line', light: 'Background light', calibration: 'Calibration' };
+function renderReady(snap) {
+  const rc = snap.ready_check;
+  const pill = $('ready-pill');
+  if (!rc) {
+    pill.className = 'pill';
+    setText('ready-pill', snap.camera_live || snap.phase === 'capturing' ? 'Checking…' : 'Waiting for camera');
+    if (!snap.camera_live && snap.phase !== 'capturing') {
+      setText('ready-advice', S.cam.state === 'ready' ? 'Waiting for the first frames…' : 'Check the camera to start the ready check.');
+    }
+    return;
+  }
+  pill.className = `pill ${rc.state}`;
+  setText('ready-pill', rc.title);
+  const by = Object.fromEntries((rc.items || []).map((i) => [i.key, i]));
+  // Free memory is only listed when it is low, to keep the panel short.
+  const order = by.memory && by.memory.state !== 'ok' ? [...READY_ORDER, 'memory'] : READY_ORDER;
+  const html = order.map((k) => {
+    const it = by[k] || { state: 'idle', label: READY_PLACEHOLDER[k], value: '—' };
+    return `<li class="${esc(it.state)}"${k === 'calibration' && it.state !== 'ok' ? ' data-open="acc-calibration" style="cursor:pointer" title="Open calibration"' : ''}>`
+      + `<span class="dot ${esc(it.state)}"></span><span class="rk">${esc(it.label)}</span><span class="rv">${esc(it.value)}</span></li>`;
+  }).join('');
+  const box = $('ready-items');
+  if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
+  setText('ready-advice', rc.advice || (rc.state === 'ok' ? 'Everything needed for a dependable scan is in place.' : ''));
+}
+$('ready-items').addEventListener('click', (e) => { const li = e.target.closest('[data-open]'); if (li) openSetup(li.dataset.open); });
+
+function renderVerdict(snap) {
+  const v = snap.verdict;
+  const busy = ['capturing', 'processing'].includes(snap.phase);
+  $('sec-verdict').hidden = !v || busy;
+  if (!v) $('sec-quality').hidden = true;
+  if (!v || busy) return;
+  $('verdict').className = `verdict ${v.status}`;
+  setText('verdict-title', v.title);
+  // The front card stays short: status, one line of numbers and a link. The reasons live in Results.
+  const reasons = v.reasons || [];
+  const more = $('verdict-more');
+  more.hidden = reasons.length === 0;
+  setText('verdict-more', reasons.length === 1 ? '1 note ›' : `${reasons.length} notes ›`);
+  $('sec-quality').hidden = false;
+  $('quality-pill').className = `pill ${v.status}`;
+  setText('quality-pill', VERDICT_LABEL[v.status] || v.status);
+  const html = reasons.map((r) => `<li>${esc(r)}</li>`).join('');
+  const ul = $('quality-reasons');
+  if (ul.dataset.html !== html) { ul.innerHTML = html; ul.dataset.html = html; }
+  ul.hidden = reasons.length === 0;
+  $('quality-empty').hidden = reasons.length !== 0;
+  const m = v.metrics || {};
+  setText('verdict-metrics', [m.area_mm2 != null ? `${Math.round(m.area_mm2)} mm²` : null,
+    m.points_per_profile != null ? `${Math.round(m.points_per_profile)} pts/profile` : null,
+    m.motion_source ? (MOTION_LABEL[m.motion_source] || m.motion_source) : null].filter(Boolean).join(' · '));
+}
+
+$('verdict-more').addEventListener('click', () => {
+  switchTab('export');
+  $('sec-quality').scrollIntoView({ block: 'start', behavior: 'smooth' });
+});
+
 function renderControls(snap) {
   const busy = ['capturing', 'processing'].includes(snap.phase);
   $('btn-start').disabled = busy || S.starting;
@@ -901,14 +1462,19 @@ function render(snap) {
     S.sessionKey = sk;
   }
 
+  if (S.lastPhase !== snap.phase && ['complete', 'complete_with_warnings', 'captured', 'error'].includes(snap.phase)) { refreshSessions(); refreshCalibration(); }
+  S.lastPhase = snap.phase;
   updateFps(snap);
   S.wantPreview = snap.phase === 'capturing';
-  if (S.wantPreview) previewLoop();
+  if (snap.camera_live && S.cam.state !== 'ready') S.cam = { ...S.cam, state: 'ready' };
+  if (S.wantPreview || snap.camera_live) previewLoop();
 
   renderChips(snap);
   renderWorkflow(snap);
   renderReadouts(snap);
   renderCameraMeta(snap);
+  renderReady(snap);
+  renderVerdict(snap);
   renderProgress(snap);
   renderAlerts(snap);
   renderWarnings(snap);
@@ -946,8 +1512,15 @@ async function poll() {
 /* ====================================================================== boot */
 (async function boot() {
   loadSetup();
+  updateReconFields();
+  await loadHardwareGeometry();
   applyTheme(document.documentElement.getAttribute('data-theme') || 'light');
+  updateSetupSummaries();
   poll();
+  refreshCameraDevices().then(updateSetupSummaries);
+  refreshSessions();
+  refreshCalibration();
+  loadROI();
   await V.init();
   if (V.ok) { V.applyTheme(); if (S.snap) maybeLoadModel(S.snap); }
 })();

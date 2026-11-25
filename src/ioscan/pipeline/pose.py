@@ -56,6 +56,10 @@ class PoseConfig:
     scan_axis_camera: tuple[float, float, float] = (0.0, 1.0, 0.0)
     world_velocity_mm_s: tuple[float, float, float] = (0.0, 5.0, 0.0)
     initial_position_mm: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # Optional IMU->camera mounting rotation: columns are the camera axes expressed in the IMU
+    # frame, so R_world_camera = R_world_imu @ imu_to_camera. None (identity) keeps the old
+    # behaviour. Without this, any IMU/camera axis mismatch rotates every profile about the wrong axis.
+    imu_to_camera: tuple[tuple[float, float, float], ...] | None = None
 
 
 class PoseTracker:
@@ -93,6 +97,12 @@ class PoseTracker:
         if axis_norm < 1e-12:
             raise ValueError("scan_axis_camera must be a non-zero vector")
         self._scan_axis_camera = axis / axis_norm
+        self._R_imu_cam: np.ndarray | None = None
+        if self.cfg.imu_to_camera is not None:
+            R_ic = np.asarray(self.cfg.imu_to_camera, dtype=np.float64).reshape(3, 3)
+            if not np.allclose(R_ic @ R_ic.T, np.eye(3), atol=1e-6) or np.linalg.det(R_ic) < 0.999:
+                raise ValueError("imu_to_camera must be a proper rotation matrix")
+            self._R_imu_cam = R_ic
         self._world_velocity = np.asarray(self.cfg.world_velocity_mm_s, dtype=np.float64).reshape(3)
         self._position = np.asarray(self.cfg.initial_position_mm, dtype=np.float64).reshape(3)
         self._last_time_s = None if initial_timestamp_s is None else float(initial_timestamp_s)
@@ -129,6 +139,8 @@ class PoseTracker:
         if not np.isfinite(timestamp_s):
             raise ValueError("Frame timestamp must be finite")
         R_wc = quat_wxyz_to_rotmat(quat_wxyz)
+        if self._R_imu_cam is not None:
+            R_wc = R_wc @ self._R_imu_cam
 
         if self._last_time_s is not None:
             dt = timestamp_s - self._last_time_s

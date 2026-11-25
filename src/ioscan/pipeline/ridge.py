@@ -12,7 +12,16 @@ class RidgeConfig:
     half_window: int = 4          # half-window in rows around peak for CoG
     max_secondary_ratio: float = 0.45  # reject column if a secondary peak > ratio * main peak
     secondary_guard_px: int = 6   # distance outside main peak to check for multipath/reflections
+    # Widen the guard band to the measured width of each column's main peak. With a fixed 6 px
+    # guard, the shoulder of a broad or haloed laser line was counted as a "secondary peak" and
+    # most columns of a real capture were rejected.
+    adaptive_guard: bool = True
     steger_sigma: float = 1.2     # Gaussian smoothing sigma for Steger / Hessian
+    # Adapt the detection threshold to the noise of each ON-OFF image (see triangulate_frame):
+    # min_prominence then acts as the upper limit of the threshold instead of a fixed value.
+    adaptive_floor: bool = False
+    adaptive_sigmas: float = 6.0
+    adaptive_min: float = 7.0
 
 
 def extract_ridge_subpixel(
@@ -54,10 +63,15 @@ def extract_ridge_subpixel(
 
     # 2. Secondary peak rejection (multipath / enamel specular reflection check)
     if cfg.max_secondary_ratio < 1.0:
-        keep = np.ones(valid_cols.size, dtype=bool)
         r_idx = np.arange(H)[:, None]
         col_slice = img[:, valid_cols]
-        outside_mask = np.abs(r_idx - p_rows[None, :]) > cfg.secondary_guard_px
+        dist = np.abs(r_idx - p_rows[None, :])
+        guard = np.full(valid_cols.size, float(cfg.secondary_guard_px))
+        if cfg.adaptive_guard:
+            near = dist <= 24
+            width = np.sum((col_slice >= 0.5 * p_vals[None, :]) & near, axis=0)
+            guard = np.maximum(guard, 1.5 * width + 2.0)
+        outside_mask = dist > guard[None, :]
         secondary_max = np.max(np.where(outside_mask, col_slice, 0.0), axis=0)
         keep = secondary_max <= (cfg.max_secondary_ratio * p_vals)
         valid_cols = valid_cols[keep]
@@ -70,13 +84,29 @@ def extract_ridge_subpixel(
     # 3. Sub-pixel refinement
     method = cfg.method.lower()
     if method == "cog":
+        # Centre of gravity in a window that is re-centred on the estimate. A window fixed on the
+        # brightest pixel cuts the line's tails unevenly whenever the true centre lies between two
+        # rows, which pulls every estimate towards a whole row ("pixel locking"). On a moving model
+        # that bias shows up as regular ripples across the surface. Re-centring the window (with
+        # fractional weights at its ends) and removing the local baseline makes it unbiased.
         hw = cfg.half_window
-        offsets = np.arange(-hw, hw + 1)[:, None]
-        win_rows = p_rows[None, :] + offsets
+        offsets = np.arange(-hw - 1, hw + 2)[:, None]
+        win_rows = np.clip(p_rows[None, :] + offsets, 0, H - 1)
         win_vals = img[win_rows, valid_cols[None, :]]
-        denom = np.sum(win_vals, axis=0)
-        good = denom > 1e-9
-        v_sub = p_rows[good].astype(np.float64) + np.sum(offsets * win_vals[:, good], axis=0) / denom[good]
+        base = np.minimum(win_vals[0], win_vals[-1])
+        win_vals = np.clip(win_vals - np.maximum(base, 0.0)[None, :], 0.0, None)
+        rel = offsets.astype(np.float64)                     # row offsets from the brightest pixel
+        c = np.zeros(valid_cols.size)
+        good = np.ones(valid_cols.size, dtype=bool)
+        for _ in range(3):
+            # weight 1 inside [c - hw, c + hw], linear fall-off over the last half pixel at each end
+            wgt = np.clip(hw + 0.5 - np.abs(rel - c[None, :]), 0.0, 1.0)
+            wv = wgt * win_vals
+            denom = wv.sum(axis=0)
+            good = denom > 1e-9
+            c = np.where(good, (rel * wv).sum(axis=0) / np.maximum(denom, 1e-9), c)
+            c = np.clip(c, -1.0, 1.0)
+        v_sub = p_rows[good].astype(np.float64) + c[good]
         return valid_cols[good].astype(np.float64), v_sub, p_vals[good]
 
     elif method == "gaussian3":

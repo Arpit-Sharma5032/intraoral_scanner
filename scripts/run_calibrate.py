@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run_pipeline import _load_calibration, _load_frame_records
+from run_pipeline import _load_frame_records
 
 from ioscan.calibration.calibrate import (
     calibrate_camera_checkerboard,
@@ -22,7 +22,7 @@ from ioscan.calibration.models import CameraIntrinsics, LaserPlane
 def run_synthetic_selftest() -> None:
     """Verify SVD laser-plane fitting and ray-board intersection on synthetic multi-pose data."""
     print("=== Running Calibration Engine Synthetic Self-Test ===")
-    cam = CameraIntrinsics(width=1600, height=1200, fx=2666.7, fy=2666.7, cx=800.0, cy=650.0)
+    cam = CameraIntrinsics(width=1600, height=1200, fx=2666.7, fy=2666.7, cx=800.0, cy=600.0)
     gt_laser = LaserPlane.from_baseline_and_angle(baseline_mm=12.0, angle_deg=30.963756532)
 
     rng = np.random.default_rng(42)
@@ -108,13 +108,15 @@ def main() -> None:
             pairs.append((img, last_off))
 
     pattern = (args.cols, args.rows)
-    try:
-        camera, cam_rms = calibrate_camera_checkerboard(off_images, pattern_size=pattern, square_size_mm=args.square_mm)
-        print(f"Calibrated Camera Intrinsics (RMS = {cam_rms:.3f} px): fx={camera.fx:.1f}, fy={camera.fy:.1f}")
-    except ValueError:
-        camera, _ = _load_calibration(args.session)
-        cam_rms = -1.0
-        print("Using existing/nominal camera intrinsics.")
+    # Never silently substitute nominal intrinsics here. A generated calibration.json
+    # must represent measured checkerboard data, not the project's example geometry.
+    camera, cam_rms = calibrate_camera_checkerboard(
+        off_images, pattern_size=pattern, square_size_mm=args.square_mm
+    )
+    print(
+        f"Calibrated camera from checkerboard images (RMS = {cam_rms:.3f} px): "
+        f"fx={camera.fx:.2f}, fy={camera.fy:.2f}, cx={camera.cx:.2f}, cy={camera.cy:.2f}"
+    )
 
     laser_pts = []
     for on_img, off_img in pairs:
@@ -133,7 +135,15 @@ def main() -> None:
         args.out,
         camera,
         laser_plane,
-        extra_meta={"camera_rms_px": cam_rms, "laser_plane_rms_um": plane_rms_mm * 1000.0},
+        extra_meta={
+            "calibration_type": "measured_checkerboard_and_laser_plane",
+            "checkerboard_inner_corners": [int(args.cols), int(args.rows)],
+            "checkerboard_square_size_mm": float(args.square_mm),
+            "camera_rms_px": float(cam_rms),
+            "laser_plane_rms_um": float(plane_rms_mm * 1000.0),
+            "laser_calibration_points": int(len(all_laser_pts)),
+            "source_session": str(args.session),
+        },
     )
     print(f"Fitted Laser Plane from {len(all_laser_pts)} points (RMS = {plane_rms_mm * 1000.0:.2f} µm)")
     print(f"Saved calibration bundle to: {saved}")

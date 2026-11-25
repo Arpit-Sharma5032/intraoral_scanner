@@ -5,7 +5,7 @@ subtraction:
 ridge:
   method: cog          # cog | gaussian3 | steger
 triangulation:
-  z_range_mm: [10.0, 45.0]
+  z_range_mm: [75.0, 125.0]
 pose:
   mode: imu_hybrid
   nominal_speed_mm_s: 5.0

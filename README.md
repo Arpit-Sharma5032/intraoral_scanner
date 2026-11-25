@@ -2,7 +2,14 @@
 
 This project captures a moving laser line, triangulates each line into camera-frame 3D points,
 places those profiles into a shared coordinate frame, and exports a point cloud and surface mesh.
-All camera/laser/reconstruction distances are in **millimetres**. The Open3D TSDF integration
+All camera/laser/reconstruction distances are in **millimetres**.
+
+> **Use the marker plate.** Motion is measured from a printed marker sheet under the model (full pose in every
+> frame, no drift), and the same sheet calibrates the camera and laser. Read `MARKER_PLATE_GUIDE.md` first.
+>
+> **Reconstruction default: linear sweep.** A single laser line cannot be placed reliably from IMU orientation
+> plus an assumed speed. The default pipeline now measures translation from the laser-OFF frames, trims to the
+> on-surface window and meshes a height map. Read `RECONSTRUCTION_APPROACH.md` before scanning. The Open3D TSDF integration
 internally converts lengths to metres because that API expects metre-scale depth data.
 
 ## Environment
@@ -99,7 +106,7 @@ python -m pip install -e ".[seg]"
 python scripts/run_dashboard.py
 ```
 
-Open `http://127.0.0.1:8787` on the scanner workstation. Select the USB camera index and ESP32 serial port (for example `COM3`), choose the jaw, and optionally supply the measured camera/laser `calibration.json` and MeshSegNet model directory. Press **Check camera**, then **Start scan workflow**. The dashboard records the session under `data/sessions/`, updates a live fused point-cloud preview while profiles are being captured, then runs the full reconstruction into `data/results/`. When enabled, MeshSegNet runs automatically after reconstruction. The **Run / retry MeshSegNet** control can also start segmentation later without repeating capture or reconstruction. The stop button ends the capture early and then processes the captured session.
+Open `http://127.0.0.1:8787` on the scanner workstation. Select the physical Arducam camera by its enumerated device name/backend and the ESP32 serial port (for example `COM3`), choose the jaw, and optionally supply the measured camera/laser `calibration.json` and MeshSegNet model directory. Press **Check camera**, then **Start scan workflow**. On Windows, FFmpeg must also be installed on the dashboard process PATH. If OpenCV DirectShow cannot sustain the required MJPG frame rate, IOSCAN now falls back to FFmpeg DirectShow using the exact selected camera name and checks the actual delivered FPS. See `CAMERA_FPS_FIX.md` for setup and exposure-validation notes. The dashboard records the session under `data/sessions/`, updates a live fused point-cloud preview while profiles are being captured, then runs the full reconstruction into `data/results/`. When enabled, MeshSegNet runs automatically after reconstruction. The **Run / retry MeshSegNet** control can also start segmentation later without repeating capture or reconstruction. The stop button ends the capture early and then processes the captured session.
 
 The camera/laser calibration file is strongly recommended for real scans. Without it, the capture logger uses nominal example intrinsics and laser-plane geometry; output dimensions are not suitable for measurement. A valid ESP32 quaternion stream is required by the current `imu_hybrid` reconstruction mode. The browser 3D viewer loads Three.js modules from jsDelivr, so the workstation needs internet access for the interactive 3D viewport; the scanner capture and reconstruction backend remain local. The server binds to `127.0.0.1` by default and should not be exposed to a network without adding authentication and access controls.
 
@@ -173,7 +180,7 @@ Prepare a calibration JSON with this shape:
 {
   "camera": {
     "width": 1600, "height": 1200,
-    "fx": 2666.7, "fy": 2666.7, "cx": 800, "cy": 650,
+    "fx": 2666.7, "fy": 2666.7, "cx": 800, "cy": 600,
     "dist_coeffs": [0, 0, 0, 0, 0], "pixel_size_um": 3.0
   },
   "laser": { "normal": [0, -0.8575, -0.5144], "d": 10.2903 }
@@ -182,7 +189,9 @@ Prepare a calibration JSON with this shape:
 
 The numbers above are only an example/nominal geometry, **not a substitute for calibration**.
 Use checkerboard-derived camera intrinsics for the actual lens and a fitted laser plane from
-measured 3D calibration points. A lens change requires a new camera calibration. For example:
+measured 3D calibration points. A lens change requires a new camera calibration. Follow
+[`CALIBRATION_GUIDE.md`](CALIBRATION_GUIDE.md) to capture the checkerboard session and generate
+`data/calibration/calibration.json` with `scripts/run_calibrate.py`. For example:
 
 ```powershell
 python scripts/run_capture.py --cam 0 --port COM3 --frames 300 `
@@ -194,8 +203,11 @@ python scripts/run_pipeline.py data/sessions/my_scan `
 ```
 
 The logger writes the shared session format (`meta.json`, `frames.csv` with `idx,t_ns,laser_on,file`,
-8-bit PNG frames and `imu.csv`) and expects ESP32 serial lines in the format
-`timestamp_us,laser_on,qw,qx,qy,qz`. With a serial port, all timestamps come from the MCU clock and capture waits for the first valid IMU
+8-bit PNG frames and `imu.csv`) and expects framed ESP32 packets in the format
+`@timestamp_us,laser_on,qw,qx,qy,qz,frame_sequence*CRC16` at 115200 baud. CRC-16/CCITT-FALSE
+checks each packet before use. Older unframed six/seven-field CSV firmware remains accepted for
+backwards compatibility, but malformed lines are discarded and packet sequence gaps stop capture.
+With a serial port, all timestamps come from the MCU clock and capture waits for the first valid IMU
 packet; without one, only the host clock is used. If no serial port is provided, the logger classifies laser
 ON/OFF frames from image intensity, but that does not provide camera orientation and the pipeline
 will not run in an IMU pose mode without quaternion data.
@@ -246,18 +258,19 @@ Teeth3DS is not redistributed. Download it under `data/teeth3ds/` and observe it
 ## ESP32 firmware and hardware bring-up
 
 The ESP32 sketch supplied for this project is included at
-`firmware/esp32_scanner/esp32_scanner.ino`. It uses the same pin map and BNO086 SPI setup from
-`esp32_scanner.ino` provided during integration review. Read
+`firmware/esp32_scanner/esp32_scanner.ino`. The current sketch uses the BNO086 over I2C
+(SDA GPIO21, SCL GPIO22 at 400 kHz); it is not an SPI firmware build. Read
 `firmware/esp32_scanner/README.md` before uploading it.
 
-The updated host parser accepts the original six-field packet and the recommended seven-field
-packet:
+The updated host parser accepts the legacy unframed six/seven-field CSV packet and the new
+framed packet:
 
 ```text
-timestamp_us,laser_on,qw,qx,qy,qz,frame_sequence
+@timestamp_us,laser_on,qw,qx,qy,qz,frame_sequence*CRC16
 ```
 
-The updated sketch emits the seven-field form, begins with a laser-OFF exposure so the first
+The firmware and host both use 115200 baud. The CRC is CRC-16/CCITT-FALSE over the CSV payload.
+The updated sketch emits the framed form, begins with a laser-OFF exposure so the first
 laser-ON frame has an ambient reference, checks that the BNO086 is initialized and recently
 updated, and stops emitting scan records when camera STROBE is absent. The Python capture code
 consumes serial packets in FIFO order, extends the ESP32 `micros()` counter across uint32 wrap,
@@ -270,13 +283,18 @@ Before a physical scan:
 2. Confirm the firmware reports BNO086 initialization and that camera STROBE events are present.
    The sketch intentionally will not fabricate free-running frame packets if STROBE is missing.
 3. Close Arduino Serial Monitor before launching the dashboard; only one process can own the COM port.
-4. Confirm the camera actually delivers 1600x1200 frames at the intended frame rate and that manual
-   exposure settings are applied by its Windows UVC driver.
+4. Use **Check camera** in Setup. The scan path now requires a verified 1600x1200 MJPG stream and
+   at least 85% of the configured acquisition rate (42.5 FPS for a 50 FPS target). It reads back
+   the actual FOURCC and measures real frame arrivals; a successful `cap.set()` or `CAP_PROP_FPS`
+   value alone is not accepted. If it fails, try the other Windows backend, close other camera apps,
+   and verify the UVC mode with the Arducam utility.
 5. Use measured camera intrinsics and a measured laser plane in `calibration.json`; example values
    are only for software smoke tests.
 
 The host pairs the next queued strobe event with the next frame returned by OpenCV and requests a
-one-frame camera buffer. This is an ordered pairing strategy, but OpenCV does not expose the OV2311
+one-frame camera buffer. Frame PNG writes run on a bounded background writer so disk encoding does
+not block camera acquisition; if storage cannot keep up, capture stops rather than silently dropping
+saved frames. This is an ordered pairing strategy, but OpenCV does not expose the OV2311
 sensor's frame counter/timestamp here. A camera/firmware timing test is still required to verify
 there is no one-frame offset or driver buffering on the actual Windows camera. If the camera vendor
 provides UVC metadata/frame timestamps, integrating that SDK is preferable for strict synchronization.
@@ -285,10 +303,31 @@ The current pose estimate still assumes constant hand speed because the BNO086 s
 not translation. The IMU-to-camera mounting transform must also be measured or mechanically aligned.
 For geometrically reliable scans, add a measured translation source (encoder or validated visual
 odometry), calibrate the sensor extrinsics, and validate coverage/registration on real multi-pass scans.
-The dashboard's current Calibration and Scan Library navigation items are informative placeholders,
-not complete in-dashboard workflows; calibration remains a CLI task and results are stored in the
+The camera/laser calibration workflow currently uses the documented CLI process in
+`CALIBRATION_GUIDE.md`; enter the generated JSON path in the dashboard Setup tab. The Scan Library
+items remain informative placeholders and calibration results are stored in the
 project's `data/results/` directory.
 
 The firmware has not been compiled/flashed or electrically tested as part of this source-code build.
 Hardware strobe polarity, electrical levels, laser safety/interlocks and the board-specific pin map
 must be verified by a qualified hardware integrator against the actual schematic and component datasheets.
+
+## High-speed scan and geometry quality gates
+
+The 1600 × 1200 hardware scan path now requires an actual MJPG stream, checked after real camera
+frames arrive, and rejects a measured acquisition rate below 85% of the configured target. The
+requested rate and actual session rate are stored separately in `meta.json`. Frame PNG encoding is
+performed by a bounded background writer; a full queue stops acquisition rather than silently
+dropping frames.
+
+`run_pipeline.py` reports measured capture FPS, ON-profile rate, points per usable profile, assumed
+profile spacing, mesh extent, ROI state, and a basic segmentation eligibility result. The
+segmentation eligibility floor (5,000 faces and at least 35 mm maximum mesh extent) is an IOSCAN
+engineering guardrail, not a validated MeshSegNet model requirement. A scan that fails it is not
+labelled as a successful dental reconstruction and is not automatically sent to MeshSegNet.
+
+The BNO086 provides orientation; the current `imu_hybrid` pose mode still assumes a configured
+constant translation speed. It is suitable only for controlled-motion experiments until an encoder
+or validated visual-odometry translation source and the IMU-to-camera extrinsic transform are
+calibrated. A single pass observes only the visible laser-swept surface; buccal/lingual coverage and
+registered multi-pass fusion remain necessary for a complete tooth/arch model.

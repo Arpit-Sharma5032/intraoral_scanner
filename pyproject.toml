@@ -11,6 +11,7 @@ dependencies = [
   "numpy>=1.26,<2",
   "scipy",
   "opencv-contrib-python>=4.9,<4.12",
+  "cv2-enumerate-cameras>=1.4.0",
   "open3d",
   "trimesh",
   "rtree",

@@ -1,0 +1,16 @@
+{
+  "baseline_mm": 19.0,
+  "laser_tilt_deg": 11.0,
+  "fan_half_angle_deg": 25.0,
+  "exposure": -9,
+  "speed_mm_s": 5.0,
+  "depth_min_mm": 75.0,
+  "depth_max_mm": 125.0,
+  "recon_mode": "sweep",
+  "translation": "auto",
+  "scan_length_mm": 0.0,
+  "auto_trim": true,
+  "auto_depth": true,
+  "secondary_ratio": 0.6,
+  "min_prominence": 25.0
+}

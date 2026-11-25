@@ -1,10 +1,10 @@
-# Laser geometry in camera coordinates (OpenCV convention: x right, y down, z forward), mm.
-# The laser apex sits `baseline_mm` BELOW the camera centre (+y) and is tilted up toward the
-# optical axis, so the projected line appears roughly horizontal in the image.
-# The line crosses the optical axis at z = baseline / tan(tilt) = 12 / tan(30.96 deg) = 20 mm.
-# Usable depth range (line stays inside the sensor) is then about 14 to 34 mm.
+# NOMINAL starting geometry based on the current physical measurements.
+# Camera/laser baseline is modeled as an offset along camera +Y. Confirm this
+# coordinate convention in the assembled mirror-folded optical path.
+# Central-axis intersection: Z = baseline / tan(tilt) = 18 / tan(10 deg) = 102.08 mm.
+# This is an estimate; measured laser-plane calibration.json must override it.
 wavelength_nm: 532
-baseline_mm: 12.0
-tilt_deg: 30.96
+baseline_mm: 18.0
+tilt_deg: 10.0
 fan_half_angle_deg: 25.0
 line_sigma_px: 1.5

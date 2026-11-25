@@ -14,6 +14,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_pipeline import _load_calibration, _load_frame_records
+from ioscan.session.loader import read_grayscale_frame
 
 from ioscan.pipeline.ridge import RidgeConfig
 from ioscan.pipeline.triangulate import triangulate_frame
@@ -55,9 +56,7 @@ def evaluate_session(session_dir: Path, method: str, cal_error_deg: float = 0.0)
     last_off = None
 
     for rec in records:
-        frame = cv2.imread(str(rec["path"]), cv2.IMREAD_UNCHANGED)
-        if frame is None:
-            continue
+        frame = read_grayscale_frame(rec["path"])
         if not rec["laser_on"]:
             last_off = frame
             continue

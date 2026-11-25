@@ -3,7 +3,8 @@
 Layout of one session directory:
     meta.json        format version, source ("sim" | "hardware"), camera, laser plane, fps, config
     frames.csv       idx, t_ns, laser_on, file
-    frames/          000000.png ...  single-channel PNG (sim: uint16/10-bit; hardware: uint8/8-bit)
+    frames/          000000.png or .jpg ... image format is recorded in frames.csv;
+                     hardware FFmpeg/MJPG captures preserve original JPEG packets
     imu.csv          t_ns, qw, qx, qy, qz     (unit quaternion, orientation of the camera)
     gt/              simulator only (never read by the pipeline itself, only by evaluation)
         poses.npz        t_ns (N,), T_wc (N,4,4)  camera-to-world transforms
@@ -29,6 +30,7 @@ import cv2
 import numpy as np
 
 from ioscan.calibration.models import CameraIntrinsics, LaserPlane
+from ioscan.session.loader import read_grayscale_frame
 
 FORMAT_VERSION = 1
 
@@ -176,10 +178,7 @@ class SessionReader:
         return float(self.meta["fps"])
 
     def read_frame(self, idx: int) -> np.ndarray:
-        img = cv2.imread(str(self.root / self._files[idx]), cv2.IMREAD_UNCHANGED)
-        if img is None:
-            raise IOError(f"Cannot read frame {idx}")
-        return img
+        return read_grayscale_frame(self.root / self._files[idx])
 
     def on_off_pairs(self) -> list[tuple[int, int]]:
         """(on_idx, off_idx) pairs: each ON frame with the adjacent OFF frame (previous first)."""

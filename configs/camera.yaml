@@ -1,11 +1,14 @@
-name: ov2311_8mm_nominal
+# PROVISIONAL ONLY: fx≈f/pixel_pitch=2.8mm/0.003mm=933px.
+# Arducam B0322 datasheet also lists 75° horizontal FOV (which implies fx≈1043px),
+# so run checkerboard calibration with the final mirror/lens assembly before trusting dimensions.
+name: ov2311_2p8mm_lens_nominal
 width: 1600
 height: 1200
 fps: 50
-fx: 2666.7
-fy: 2666.7
+fx: 933.3
+fy: 933.3
 cx: 800.0
 cy: 600.0
 dist_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
 pixel_size_um: 3.0
-focal_length_mm: 8.0
+focal_length_mm: 2.8

@@ -54,6 +54,8 @@ PALETTE = np.array([
 CKPT_SUFFIXES = (".tar", ".pth", ".pt", ".ckpt", ".zip")
 INNER_CKPT_SUFFIXES = (".tar", ".pth", ".pt", ".ckpt")
 PARTIAL_SCAN_EXTENT_MM = 35.0
+MIN_SEGMENTATION_INPUT_FACES = 5000
+MIN_SEGMENTATION_EXTENT_MM = 35.0
 
 
 def _import_torch():
@@ -533,31 +535,60 @@ def segment_mesh_and_cloud(
         if progress_callback is not None:
             progress_callback({"stage": stage, "progress": float(progress), "message": message})
 
-    report("segmentation", 3.0, "Loading scan and segmentation model")
-    torch = _import_torch()
+    report("segmentation", 3.0, "Checking scan geometry before loading the segmentation model")
     _require_open3d()
     cfg = cfg or SegmentConfig()
     mesh_path = Path(mesh_path)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
+    # Prevent outputs from a previous scan from being mistaken for this attempt.
+    for name in ("segmented_full_colored.ply", "segmented_clean_teeth.ply", "segmented_clean_teeth.stl",
+                 "segmented_cloud.ply", "segmentation_labels.npz"):
+        stale = out / name
+        if stale.is_file():
+            stale.unlink()
+    stale_tooth_dir = out / "segmented_teeth_by_class"
+    if stale_tooth_dir.is_dir():
+        import shutil
+        shutil.rmtree(stale_tooth_dir)
 
     mesh = _load_triangle_mesh(mesh_path)
     points = np.asarray(mesh.vertices, dtype=np.float64)
     faces = np.asarray(mesh.triangles, dtype=np.int64)
 
+    if len(faces) < MIN_SEGMENTATION_INPUT_FACES:
+        raise RuntimeError(
+            f"Mesh has only {len(faces):,} triangles; at least {MIN_SEGMENTATION_INPUT_FACES:,} "
+            "are required by the IOSCAN scan-quality gate before MeshSegNet. This is a project "
+            "quality guard, not a claim about the model's intrinsic minimum. Recapture with dense, "
+            "overlapping profiles; segmentation cannot reconstruct missing surface geometry."
+        )
+
     notes: list[str] = []
     extent = points.max(axis=0) - points.min(axis=0)
-    if float(extent.max()) < PARTIAL_SCAN_EXTENT_MM:
-        notes.append(
-            f"Mesh extent is only {extent.max():.1f} mm: this looks like a partial scan, not a full "
-            "arch. MeshSegNet expects full dental surfaces, so tooth labels may be unreliable."
+    if float(extent.max()) < MIN_SEGMENTATION_EXTENT_MM:
+        raise RuntimeError(
+            f"Mesh spans only {float(extent.max()):.2f} mm; at least "
+            f"{MIN_SEGMENTATION_EXTENT_MM:.0f} mm is required by the IOSCAN dental-arch quality gate. "
+            "This is a project guard, not a model-intrinsic limit. A small patch is not a complete "
+            "arch; recapture the scan before attempting tooth segmentation."
+        )
+    from ioscan.pipeline.quality import MAX_EXTENT_MM
+    if float(extent.max()) > MAX_EXTENT_MM:
+        raise RuntimeError(
+            f"Mesh spans {float(extent.max()):.1f} mm, larger than any dental arch (> {MAX_EXTENT_MM:.0f} mm). "
+            "This is the signature of a smeared reconstruction (wrong scan speed or orientation path), "
+            "not a bigger jaw; MeshSegNet labels on it would be meaningless. Fix the pose/translation "
+            "and recapture."
         )
     notes.append(
         "The input mesh is not automatically aligned to a canonical dental coordinate frame. "
         "Predictions can be orientation-sensitive."
     )
 
+    # Avoid importing PyTorch/loading checkpoints until the mesh has passed quality checks.
+    torch = _import_torch()
+    device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
     ckpt_path, jaw = resolve_segmentation_model(cfg, session_hint=session_hint)
     report("segmentation", 12.0, f"Selected {jaw} jaw checkpoint")
     if jaw == "auto":

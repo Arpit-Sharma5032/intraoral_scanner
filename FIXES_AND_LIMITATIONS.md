@@ -48,7 +48,7 @@ validation status are recorded in the integration section below.
    when non-zero coefficients are supplied. Triangulation calls the common camera model and checks
    frame dimensions rather than duplicating a pinhole-only formula.
 6. **Calibration/sensor-size consistency.** The nominal camera config now matches the supplied
-   session's 1600x1300 image size and principal point. A session's own calibration is used; the
+   session's 1600x1200 image size and principal point. A session's own calibration is used; the
    pipeline no longer silently assumes a different hard-coded sensor calibration.
 7. **Fusion units and normal orientation.** TSDF voxel/truncation values are converted from the
    project millimetre convention to metres for Open3D. Point-cloud normals are oriented toward the

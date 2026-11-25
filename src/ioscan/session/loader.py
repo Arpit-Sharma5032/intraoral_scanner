@@ -16,10 +16,37 @@ import json
 from pathlib import Path
 import warnings
 
+import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 
 from ioscan.calibration.models import CameraIntrinsics, LaserPlane
+
+
+def read_grayscale_frame(path: str | Path) -> np.ndarray:
+    """Read a stored frame as one channel while preserving its source bit depth.
+
+    Hardware MJPEG/JPEG files may decode as BGR even when the camera sensor is
+    monochrome. The triangulation pipeline requires a single-channel image.
+    IMREAD_UNCHANGED preserves uint16 simulator PNGs; colour images are converted
+    to grayscale without silently reducing their bit depth.
+    """
+    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise IOError(f"Cannot read frame {path}")
+    if image.ndim == 3:
+        channels = image.shape[2]
+        if channels == 3:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        elif channels == 4:
+            image = cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
+        elif channels == 1:
+            image = image[:, :, 0]
+        else:
+            raise ValueError(f"Unsupported frame channel count {channels} in {path}")
+    if image.ndim != 2:
+        raise ValueError(f"Expected a grayscale image in {path}, got shape {image.shape}")
+    return np.ascontiguousarray(image)
 
 
 def load_calibration(session_dir: str | Path) -> tuple[CameraIntrinsics, LaserPlane, bool]:

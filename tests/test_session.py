@@ -43,3 +43,18 @@ def test_refuses_overwrite(tmp_path):
     (tmp_path / "s").mkdir()
     with pytest.raises(FileExistsError):
         SessionWriter(tmp_path / "s", _cam(), LaserPlane(np.array([0, 1.0, 0]), 1.0), 50.0)
+
+
+def test_read_grayscale_frame_converts_color_jpeg(tmp_path):
+    import cv2
+    from ioscan.session.loader import read_grayscale_frame
+
+    gray = np.full((24, 32), 127, dtype=np.uint8)
+    bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    path = tmp_path / "color_decoded.jpg"
+    assert cv2.imwrite(str(path), bgr)
+
+    loaded = read_grayscale_frame(path)
+    assert loaded.shape == (24, 32)
+    assert loaded.ndim == 2
+    assert loaded.dtype == np.uint8

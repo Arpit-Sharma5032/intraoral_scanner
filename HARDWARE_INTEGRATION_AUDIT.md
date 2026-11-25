@@ -1,5 +1,10 @@
 # IOSCAN hardware integration audit
 
+> **Latest acquisition/reconstruction review — 7 November 2026:** see
+> [`ENGINEERING_REVIEW_AND_FIXES.md`](ENGINEERING_REVIEW_AND_FIXES.md) for the audited session numbers,
+> low-FPS/flat-mesh root causes, code changes, test results and hardware acceptance checklist.
+> The previous notes below describe earlier integration work; read the latest review where details differ.
+
 ## Overall assessment
 
 The acquisition, reconstruction, and MeshSegNet software stages are connected in the dashboard workflow. The ESP32 CSV protocol is compatible with the Python capture reader. The codebase is **not yet verified as hardware-ready**: no physical OV2311/ESP32/BNO086 capture, timing test, or firmware upload has been performed in this build environment.
@@ -35,7 +40,7 @@ The host consumes the next serial strobe event and then reads the next OpenCV fr
 
 ### 2. Measure camera and laser calibration
 
-Use actual 1600x1300 camera intrinsics (including distortion) and fit the laser plane with a measured calibration target and multiple poses. The example numbers in `configs/camera.yaml`, `configs/laser.yaml`, and README examples are nominal only. A pipeline run with nominal calibration is a software smoke test, not a geometrically reliable scan.
+Use actual 1600x1200 camera intrinsics (including distortion) and fit the laser plane with a measured calibration target and multiple poses. The example numbers in `configs/camera.yaml`, `configs/laser.yaml`, and README examples are nominal only. A pipeline run with nominal calibration is a software smoke test, not a geometrically reliable scan.
 
 ### 3. Calibrate the IMU mounting transform
 
